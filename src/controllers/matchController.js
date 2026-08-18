@@ -240,11 +240,14 @@ const updateScore = async (req, res, next) => {
 const confirmMatch = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const confirmedMatch = await confirmMatchWinner(id, req.user);
+    const { winnerTeamId } = req.body || {};
+    const result = await confirmMatchWinner(id, req.user, winnerTeamId);
     res.json({
       success: true,
-      message: 'Match winner confirmed and advanced to next round.',
-      match: confirmedMatch
+      message: 'Match winner confirmed and advanced to bracket.',
+      match: result.match,
+      roundAdvanced: result.roundAdvanced,
+      nextReadyMatch: result.nextReadyMatch
     });
   } catch (error) {
     next(error);

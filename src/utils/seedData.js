@@ -232,8 +232,10 @@ const seedDatabase = async () => {
       }
     }
 
-    // Mixed Doubles (6 pairs)
-    for (let i = 0; i < 6; i++) {
+    // Mixed Doubles (8 valid mutual pairs among the 8 females and 8 matching males)
+    // Nikhil Saxena and Manish Rawat have requested non-registered partners (Isha Deshmukh & Prisha Kapoor)
+    // and must NOT have approved Mixed Doubles teams.
+    for (let i = 0; i < 8; i++) {
       const p1 = maleParticipants[i];
       const p2 = femaleParticipants[i];
       await Team.create({
@@ -246,7 +248,7 @@ const seedDatabase = async () => {
       });
     }
 
-    console.log('[Seed] Created all approved category teams.');
+    console.log('[Seed] Created all approved category teams (10 Boys Singles, 8 Girls Singles, 5 Boys Doubles, 4 Girls Doubles, 8 Mixed Doubles = 35 total entries).');
 
     // 5. Generate Dynamic Knockout Draws
     console.log('[Seed] Generating dynamic knockout bracket for Boys Singles (10 teams -> P=16, 6 byes)...');
@@ -261,14 +263,19 @@ const seedDatabase = async () => {
     console.log('[Seed] Generating dynamic knockout bracket for Girls Doubles (4 teams -> P=4, 0 byes)...');
     await generateDynamicBracket(tournament._id, 'girls_doubles', adminUser._id);
 
+    console.log('[Seed] Generating dynamic knockout bracket for Mixed Doubles (8 teams -> P=8, 0 byes)...');
+    await generateDynamicBracket(tournament._id, 'mixed_doubles', adminUser._id);
+
     tournament.drawsPublished.boys_singles = true;
     tournament.drawsPublished.girls_singles = true;
     tournament.drawsPublished.boys_doubles = true;
     tournament.drawsPublished.girls_doubles = true;
+    tournament.drawsPublished.mixed_doubles = true;
     tournament.drawsLocked.boys_singles = true;
     tournament.drawsLocked.girls_singles = true;
     tournament.drawsLocked.boys_doubles = true;
     tournament.drawsLocked.girls_doubles = true;
+    tournament.drawsLocked.mixed_doubles = true;
     tournament.markModified('drawsPublished');
     tournament.markModified('drawsLocked');
     await tournament.save();

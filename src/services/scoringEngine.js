@@ -134,7 +134,7 @@ const updateMatchLiveScore = async (matchId, scoreData, adminUser) => {
 /**
  * Confirms match result, sets winner, and automatically advances winner to next round
  */
-const confirmMatchWinner = async (matchId, adminUser) => {
+const confirmMatchWinner = async (matchId, adminUser, overrideWinnerTeamId = null) => {
   const match = await Match.findById(matchId)
     .populate('team1')
     .populate('team2');
@@ -147,15 +147,28 @@ const confirmMatchWinner = async (matchId, adminUser) => {
     throw new Error('Cannot confirm match: Both teams must be determined.');
   }
 
-  const evaluation = evaluateMatchBoards(match.boards);
-  if (!evaluation.isMatchDecided) {
-    throw new Error(
-      `Cannot confirm match winner: A team must win 2 boards (Best of 3). Current score: ${evaluation.team1BoardsWon} - ${evaluation.team2BoardsWon}.`
-    );
-  }
+  let winningTeamId = overrideWinnerTeamId;
 
-  const winningTeamId = evaluation.matchWinnerSlot === 'team1' ? match.team1._id : match.team2._id;
-  const losingTeamId = evaluation.matchWinnerSlot === 'team1' ? match.team2._id : match.team1._id;
+  if (!winningTeamId) {
+    const evaluation = evaluateMatchBoards(match.boards);
+    if (evaluation.isMatchDecided) {
+      winningTeamId = evaluation.matchWinnerSlot === 'team1' ? match.team1._id : match.team2._id;
+    } else {
+      let t1Won = 0;
+      let t2Won = 0;
+      match.boards.forEach((b) => {
+        if (b.boardWinner === 'team1') t1Won++;
+        if (b.boardWinner === 'team2') t2Won++;
+      });
+      if (t1Won > t2Won) winningTeamId = match.team1._id;
+      else if (t2Won > t1Won) winningTeamId = match.team2._id;
+      else {
+        const p1 = (match.boards[0]?.team1Score || 0) + (match.boards[1]?.team1Score || 0) + (match.boards[2]?.team1Score || 0);
+        const p2 = (match.boards[0]?.team2Score || 0) + (match.boards[1]?.team2Score || 0) + (match.boards[2]?.team2Score || 0);
+        winningTeamId = p2 > p1 ? match.team2._id : match.team1._id;
+      }
+    }
+  }
 
   match.winnerTeam = winningTeamId;
   match.status = 'completed';
@@ -167,11 +180,21 @@ const confirmMatchWinner = async (matchId, adminUser) => {
 
   // Automatically check if all round matches are finished and advance category to next round
   const { progressCategoryToNextRound } = require('./drawEngine');
-  await progressCategoryToNextRound(match.tournamentId, match.category, match.roundNumber);
+  const roundAdvanced = await progressCategoryToNextRound(match.tournamentId, match.category, match.roundNumber);
 
   // Recalculate estimated start times for remaining READY matches from actual completion time
   const { recalculateEstimatedTimes } = require('./scheduleEngine');
   await recalculateEstimatedTimes(match.tournamentId);
+
+  // Find next match in READY queue
+  const nextReadyMatch = await Match.findOne({
+    tournamentId: match.tournamentId,
+    status: 'scheduled',
+    _id: { $ne: match._id }
+  })
+    .populate('team1')
+    .populate('team2')
+    .sort({ queuePosition: 1 });
 
   // Record audit log
   await AuditLog.create({
@@ -186,12 +209,17 @@ const confirmMatchWinner = async (matchId, adminUser) => {
       matchNumber: match.matchNumber,
       winnerTeam: winningTeamId,
       finalScore: match.finalScore,
-      actualEndTime: match.actualEndTime
+      actualEndTime: match.actualEndTime,
+      roundAdvanced
     },
-    reason: `Confirmed match winner for Match #${match.matchNumber} (${evaluation.team1BoardsWon} - ${evaluation.team2BoardsWon}) on Main Carrom Board.`
+    reason: `Confirmed match winner for Match #${match.matchNumber} on Main Carrom Board.`
   });
 
-  return match;
+  return {
+    match,
+    roundAdvanced,
+    nextReadyMatch
+  };
 };
 
 /**

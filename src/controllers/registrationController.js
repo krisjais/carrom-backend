@@ -4,6 +4,7 @@ const Tournament = require('../models/Tournament');
 const Team = require('../models/Team');
 const Match = require('../models/Match');
 const AuditLog = require('../models/AuditLog');
+const User = require('../models/User');
 
 // Public / Participant submission
 const submitRegistration = async (req, res, next) => {
@@ -95,7 +96,12 @@ const submitRegistration = async (req, res, next) => {
   }
 };
 
-// Admin: Get all registrations with filtering
+const {
+  enrichRegistrationsWithValidation,
+  getTournamentEntryValidationReport
+} = require('../services/partnerValidationEngine');
+
+// Admin: Get all registrations with filtering and partner validation enrichment
 const getAllRegistrations = async (req, res, next) => {
   try {
     const { status, gender, search, tournamentId } = req.query;
@@ -129,7 +135,25 @@ const getAllRegistrations = async (req, res, next) => {
       });
     }
 
-    res.json({ success: true, count: registrations.length, registrations });
+    const enrichedRegistrations = await enrichRegistrationsWithValidation(registrations, tournId);
+
+    res.json({ success: true, count: enrichedRegistrations.length, registrations: enrichedRegistrations });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// Admin: Get tournament partner validation summary report
+const getValidationSummary = async (req, res, next) => {
+  try {
+    let tournId = req.query.tournamentId;
+    if (!tournId) {
+      const activeTourn = await Tournament.findOne().sort({ createdAt: -1 });
+      if (activeTourn) tournId = activeTourn._id;
+    }
+
+    const report = await getTournamentEntryValidationReport(tournId);
+    res.json({ success: true, report });
   } catch (error) {
     next(error);
   }
@@ -250,9 +274,67 @@ const updateRegistrationStatus = async (req, res, next) => {
   }
 };
 
+// Admin: Delete registration and participant
+const deleteRegistration = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const registration = await Registration.findById(id).populate('participantId');
+    if (!registration) {
+      return res.status(404).json({ success: false, message: 'Registration not found.' });
+    }
+
+    const participant = registration.participantId;
+    const participantName = participant ? participant.fullName : 'Unknown';
+
+    // Remove teams associated with this participant
+    if (participant) {
+      await Team.deleteMany({
+        $or: [{ player1: participant._id }, { player2: participant._id }]
+      });
+
+      // Remove login user account if exists
+      if (participant.userId) {
+        await User.findByIdAndDelete(participant.userId);
+      }
+      if (participant.email) {
+        await User.deleteMany({ email: participant.email.toLowerCase() });
+      }
+
+      // Delete participant record
+      await Participant.findByIdAndDelete(participant._id);
+    }
+
+    // Delete registration record
+    await Registration.findByIdAndDelete(id);
+
+    await AuditLog.create({
+      action: 'DELETE_REGISTRATION',
+      performedBy: req.user._id,
+      performedByName: req.user.fullName,
+      entityType: 'Registration',
+      entityId: id,
+      details: {
+        participant: participantName,
+        email: participant?.email,
+        studentId: participant?.studentId
+      },
+      reason: `Admin deleted user/registration for ${participantName}.`
+    });
+
+    res.json({
+      success: true,
+      message: `User and registration for ${participantName} deleted successfully.`
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   submitRegistration,
   getAllRegistrations,
   getMyRegistration,
-  updateRegistrationStatus
+  updateRegistrationStatus,
+  deleteRegistration,
+  getValidationSummary
 };

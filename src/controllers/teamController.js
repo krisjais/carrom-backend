@@ -57,6 +57,13 @@ const createDoublesPair = async (req, res, next) => {
       return res.status(404).json({ success: false, message: 'One or both participants not found.' });
     }
 
+    if (!player1.isApproved || !player2.isApproved) {
+      return res.status(400).json({
+        success: false,
+        message: 'Both participants must have approved registration status before forming a tournament doubles team.'
+      });
+    }
+
     // Gender validation for category
     if (category === 'boys_doubles') {
       if (player1.gender !== 'male' || player2.gender !== 'male') {
