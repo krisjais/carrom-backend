@@ -8,11 +8,11 @@ const AuditLog = require('../models/AuditLog');
  * Generates dynamic round names based on entry count
  */
 const getRoundNameByEntries = (entriesCount, roundNumber, totalRounds) => {
-  if (entriesCount === 2) return 'Finals';
-  if (entriesCount === 3 || entriesCount === 4) return 'Semifinals';
-  if (entriesCount >= 5 && entriesCount <= 8) return 'Quarterfinals';
-  if (entriesCount >= 9 && entriesCount <= 16) return 'Round of 16';
-  if (entriesCount >= 17 && entriesCount <= 32) return 'Round of 32';
+  if (roundNumber === totalRounds || entriesCount === 2) return 'Finals';
+  if (roundNumber === totalRounds - 1 || entriesCount <= 4) return 'Semifinals';
+  if (roundNumber === totalRounds - 2 || entriesCount <= 8) return 'Quarterfinals';
+  if (entriesCount <= 16) return 'Round of 16';
+  if (entriesCount <= 32) return 'Round of 32';
   return `Round ${roundNumber}`;
 };
 
