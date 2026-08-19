@@ -3,59 +3,108 @@ const Registration = require('../models/Registration');
 const Team = require('../models/Team');
 
 /**
- * Validates a requested partner for a specific category
- *
- * Rules:
- * 1. The partner exists in the participant database (case-insensitive name match).
- * 2. The partner has the correct gender for the category (Boys=male, Girls=female, Mixed=1 male + 1 female).
- * 3. Both participants are approved.
- * 4. Mutual reference or approved Team pairing.
- * 5. Neither participant is already assigned to another team in the same doubles category.
- * 6. Team contains exactly two participants.
+ * Normalizes a string for comparison (lowercase, trimmed, collapsed whitespace)
  */
-const validatePartnerRequest = async (participant, requestedPartnerName, category, tournamentId, allParticipantsMap = null, allTeamsMap = null, allRegistrationsMap = null) => {
-  if (!requestedPartnerName || !requestedPartnerName.trim()) {
+const normalizeText = (text) => {
+  return (text || '').toLowerCase().replace(/\s+/g, ' ').trim();
+};
+
+/**
+ * Checks if two names are reasonably matching
+ */
+const isNameMatch = (name1, name2) => {
+  const n1 = normalizeText(name1);
+  const n2 = normalizeText(name2);
+  if (!n1 || !n2) return false;
+  if (n1 === n2) return true;
+
+  const parts1 = n1.split(' ').filter(Boolean);
+  const parts2 = n2.split(' ').filter(Boolean);
+
+  if (parts1.length > 0 && parts2.length > 0) {
+    const common = parts1.filter((p) => parts2.includes(p));
+    if (common.length >= Math.min(parts1.length, parts2.length)) return true;
+  }
+
+  return false;
+};
+
+/**
+ * Validates a requested partner for a specific category
+ */
+const validatePartnerRequest = async (
+  participant,
+  requestedPartnerName,
+  requestedPartnerStudentId,
+  category,
+  tournamentId,
+  allParticipantsByName = null,
+  allTeamsMap = null
+) => {
+  const reqName = (requestedPartnerName || '').trim();
+
+  // 1. No partner requested
+  if (!reqName) {
     return {
       isValid: false,
       status: 'none',
-      message: 'No partner requested',
+      message: 'No partner requested (Singles only)',
+      requestedName: '',
       partner: null,
-      team: null
+      team: null,
+      canPair: false
     };
   }
 
-  const cleanName = requestedPartnerName.trim().toLowerCase();
-
-  // 1. Find requested partner in database
+  // 2. Find partner in participant database by name
   let partner = null;
-  if (allParticipantsMap) {
-    partner = allParticipantsMap.get(cleanName) || null;
+  const cleanName = normalizeText(reqName);
+
+  if (allParticipantsByName) {
+    partner = allParticipantsByName.get(cleanName) || null;
   } else {
     partner = await Participant.findOne({
       fullName: { $regex: new RegExp(`^${cleanName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }
     });
   }
 
+  // If partner does not exist yet
   if (!partner) {
     return {
       isValid: false,
-      status: 'invalid_not_found',
-      message: 'INVALID PARTNER: Partner not found / not registered',
-      requestedName: requestedPartnerName,
+      status: 'partner_not_registered',
+      message: 'Partner has not registered yet.',
+      requestedName: reqName,
       partner: null,
-      team: null
+      team: null,
+      canPair: false
     };
   }
 
-  // 2. Gender validation
+  // Cannot partner with oneself
+  if (partner._id.toString() === participant._id.toString()) {
+    return {
+      isValid: false,
+      status: 'invalid_self',
+      message: 'Invalid Partner: Cannot nominate yourself as partner',
+      requestedName: reqName,
+      partner: null,
+      team: null,
+      canPair: false
+    };
+  }
+
+  // 3. Gender compatibility
   if (category === 'boys_doubles') {
     if (participant.gender !== 'male' || partner.gender !== 'male') {
       return {
         isValid: false,
         status: 'invalid_gender',
-        message: 'INVALID GENDER: Both players in Boys Doubles must be male',
+        message: 'Invalid gender: Both players in Boys Doubles must be male',
+        requestedName: reqName,
         partner,
-        team: null
+        team: null,
+        canPair: false
       };
     }
   } else if (category === 'girls_doubles') {
@@ -63,43 +112,40 @@ const validatePartnerRequest = async (participant, requestedPartnerName, categor
       return {
         isValid: false,
         status: 'invalid_gender',
-        message: 'INVALID GENDER: Both players in Girls Doubles must be female',
+        message: 'Invalid gender: Both players in Girls Doubles must be female',
+        requestedName: reqName,
         partner,
-        team: null
+        team: null,
+        canPair: false
       };
     }
   } else if (category === 'mixed_doubles') {
-    const isMixed = (participant.gender === 'male' && partner.gender === 'female') ||
-                    (participant.gender === 'female' && partner.gender === 'male');
+    const isMixed =
+      (participant.gender === 'male' && partner.gender === 'female') ||
+      (participant.gender === 'female' && partner.gender === 'male');
     if (!isMixed) {
       return {
         isValid: false,
         status: 'invalid_gender',
-        message: 'INVALID GENDER: Mixed Doubles requires exactly 1 male + 1 female',
+        message: 'Invalid gender: Mixed Doubles requires exactly 1 male + 1 female',
+        requestedName: reqName,
         partner,
-        team: null
+        team: null,
+        canPair: false
       };
     }
   }
 
-  // 3. Approval check
-  if (!participant.isApproved || !partner.isApproved) {
-    return {
-      isValid: false,
-      status: 'not_approved',
-      message: !partner.isApproved ? `PARTNER PENDING: ${partner.fullName} is awaiting registration approval` : 'Participant awaiting approval',
-      partner,
-      team: null
-    };
-  }
-
-  // 4. Check if an approved Team already exists for this pair in this category
+  // 4. Check if Team is ALREADY formed and approved
   let existingTeam = null;
   if (allTeamsMap && tournamentId) {
     const categoryTeams = allTeamsMap.get(`${tournamentId}_${category}`) || [];
-    existingTeam = categoryTeams.find((t) =>
-      (t.player1?._id?.toString() === participant._id?.toString() && t.player2?._id?.toString() === partner._id?.toString()) ||
-      (t.player1?._id?.toString() === partner._id?.toString() && t.player2?._id?.toString() === participant._id?.toString())
+    existingTeam = categoryTeams.find(
+      (t) =>
+        (t.player1?._id?.toString() === participant._id?.toString() &&
+          t.player2?._id?.toString() === partner._id?.toString()) ||
+        (t.player1?._id?.toString() === partner._id?.toString() &&
+          t.player2?._id?.toString() === participant._id?.toString())
     );
   } else if (tournamentId) {
     existingTeam = await Team.findOne({
@@ -117,21 +163,24 @@ const validatePartnerRequest = async (participant, requestedPartnerName, categor
     return {
       isValid: true,
       status: 'valid_paired',
-      message: `Approved Team (${existingTeam.name})`,
+      message: `Team paired & approved (${existingTeam.name})`,
+      requestedName: reqName,
       partner,
-      team: existingTeam
+      team: existingTeam,
+      canPair: false // already paired
     };
   }
 
-  // 5. Check if either participant is already on another team in this category
+  // 5. Check if either player is already on another team in this category
   let conflictTeam = null;
   if (allTeamsMap && tournamentId) {
     const categoryTeams = allTeamsMap.get(`${tournamentId}_${category}`) || [];
-    conflictTeam = categoryTeams.find((t) =>
-      t.player1?._id?.toString() === participant._id?.toString() ||
-      t.player2?._id?.toString() === participant._id?.toString() ||
-      t.player1?._id?.toString() === partner._id?.toString() ||
-      t.player2?._id?.toString() === partner._id?.toString()
+    conflictTeam = categoryTeams.find(
+      (t) =>
+        t.player1?._id?.toString() === participant._id?.toString() ||
+        t.player2?._id?.toString() === participant._id?.toString() ||
+        t.player1?._id?.toString() === partner._id?.toString() ||
+        t.player2?._id?.toString() === partner._id?.toString()
     );
   } else if (tournamentId) {
     conflictTeam = await Team.findOne({
@@ -151,51 +200,38 @@ const validatePartnerRequest = async (participant, requestedPartnerName, categor
     return {
       isValid: false,
       status: 'already_paired',
-      message: `PARTNER CONFLICT: A player is already in team "${conflictTeam.name}"`,
+      message: `Partner conflict: A player is already in team "${conflictTeam.name}"`,
+      requestedName: reqName,
       partner,
-      team: conflictTeam
+      team: conflictTeam,
+      canPair: false
     };
   }
 
-  // 6. Check mutual partner request in registrations
-  let isMutual = false;
-  if (allRegistrationsMap && tournamentId) {
-    const partnerReg = allRegistrationsMap.get(`${tournamentId}_${partner._id.toString()}`);
-    if (partnerReg) {
-      const partnerField = category === 'mixed_doubles' ? partnerReg.mixedDoublesPartnerName : partnerReg.doublesPartnerName;
-      if (partnerField && partnerField.trim().toLowerCase() === participant.fullName.trim().toLowerCase()) {
-        isMutual = true;
-      }
-    }
-  } else if (tournamentId) {
-    const partnerReg = await Registration.findOne({
-      tournamentId,
-      participantId: partner._id
-    });
-    if (partnerReg) {
-      const partnerField = category === 'mixed_doubles' ? partnerReg.mixedDoublesPartnerName : partnerReg.doublesPartnerName;
-      if (partnerField && partnerField.trim().toLowerCase() === participant.fullName.trim().toLowerCase()) {
-        isMutual = true;
-      }
-    }
-  }
-
-  if (isMutual) {
+  // 6. Approval check
+  if (!participant.isApproved || !partner.isApproved) {
     return {
-      isValid: true,
-      status: 'valid_mutual',
-      message: 'Mutual Partner Match (Ready for Admin Pair Approval)',
+      isValid: false,
+      status: 'pending_approval',
+      message: !partner.isApproved
+        ? `${partner.fullName} is awaiting registration approval`
+        : 'Participant awaiting approval',
+      requestedName: reqName,
       partner,
-      team: null
+      team: null,
+      canPair: false
     };
   }
 
+  // 7. Ready to Pair!
   return {
-    isValid: false,
-    status: 'unmatched',
-    message: `UNMATCHED: Waiting for ${partner.fullName} to request ${participant.fullName} or Admin pairing`,
+    isValid: true,
+    status: 'partner_registered',
+    message: `Partner registered & verified (${partner.fullName}). Ready to pair.`,
+    requestedName: reqName,
     partner,
-    team: null
+    team: null,
+    canPair: true
   };
 };
 
@@ -208,20 +244,15 @@ const enrichRegistrationsWithValidation = async (registrations, tournamentId) =>
   // Pre-fetch all participants and teams for batch lookup
   const participants = await Participant.find();
   const participantsByName = new Map();
+
   participants.forEach((p) => {
-    participantsByName.set(p.fullName.trim().toLowerCase(), p);
+    if (p.fullName) participantsByName.set(normalizeText(p.fullName), p);
   });
 
   const teams = await Team.find({ tournamentId, isApproved: true });
   const teamsMap = new Map();
   ['boys_doubles', 'girls_doubles', 'mixed_doubles'].forEach((cat) => {
     teamsMap.set(`${tournamentId}_${cat}`, teams.filter((t) => t.category === cat));
-  });
-
-  const allRegs = await Registration.find({ tournamentId });
-  const regsMap = new Map();
-  allRegs.forEach((r) => {
-    regsMap.set(`${tournamentId}_${r.participantId?.toString()}`, r);
   });
 
   const enriched = [];
@@ -231,24 +262,25 @@ const enrichRegistrationsWithValidation = async (registrations, tournamentId) =>
 
     if (p) {
       const doublesCat = p.gender === 'male' ? 'boys_doubles' : 'girls_doubles';
+
       regObj.doublesValidation = await validatePartnerRequest(
         p,
         reg.doublesPartnerName,
+        reg.doublesPartnerStudentId,
         doublesCat,
         tournamentId,
         participantsByName,
-        teamsMap,
-        regsMap
+        teamsMap
       );
 
       regObj.mixedDoublesValidation = await validatePartnerRequest(
         p,
         reg.mixedDoublesPartnerName,
+        reg.mixedDoublesPartnerStudentId,
         'mixed_doubles',
         tournamentId,
         participantsByName,
-        teamsMap,
-        regsMap
+        teamsMap
       );
     }
 
@@ -293,45 +325,23 @@ const getTournamentEntryValidationReport = async (tournamentId) => {
     const p = reg.participantId;
     if (!p) return;
 
-    // Doubles check
-    if (reg.doublesValidation?.status === 'invalid_not_found') {
-      invalidPartnerRequests.push({
-        participantName: p.fullName,
-        studentId: p.studentId,
-        gender: p.gender,
-        category: p.gender === 'male' ? 'Boys Doubles' : 'Girls Doubles',
-        requestedPartnerName: reg.doublesPartnerName,
-        reason: 'Partner not found / not registered'
-      });
-    } else if (reg.doublesValidation?.status === 'unmatched') {
+    if (reg.doublesValidation?.status === 'partner_not_registered') {
       unmatchedPartnerRequests.push({
         participantName: p.fullName,
-        studentId: p.studentId,
         gender: p.gender,
         category: p.gender === 'male' ? 'Boys Doubles' : 'Girls Doubles',
         requestedPartnerName: reg.doublesPartnerName,
-        reason: reg.doublesValidation.message
+        reason: 'Partner has not registered yet.'
       });
     }
 
-    // Mixed Doubles check
-    if (reg.mixedDoublesValidation?.status === 'invalid_not_found') {
-      invalidPartnerRequests.push({
-        participantName: p.fullName,
-        studentId: p.studentId,
-        gender: p.gender,
-        category: 'Mixed Doubles',
-        requestedPartnerName: reg.mixedDoublesPartnerName,
-        reason: 'Partner not found / not registered'
-      });
-    } else if (reg.mixedDoublesValidation?.status === 'unmatched') {
+    if (reg.mixedDoublesValidation?.status === 'partner_not_registered') {
       unmatchedPartnerRequests.push({
         participantName: p.fullName,
-        studentId: p.studentId,
         gender: p.gender,
         category: 'Mixed Doubles',
         requestedPartnerName: reg.mixedDoublesPartnerName,
-        reason: reg.mixedDoublesValidation.message
+        reason: 'Partner has not registered yet.'
       });
     }
   });

@@ -19,13 +19,25 @@ const registrationSchema = new mongoose.Schema(
     },
     doublesPartnerName: {
       type: String,
-      required: true,
+      default: '',
       trim: true
+    },
+    doublesPartnerStudentId: {
+      type: String,
+      default: '',
+      trim: true,
+      uppercase: true
     },
     mixedDoublesPartnerName: {
       type: String,
-      required: true,
+      default: '',
       trim: true
+    },
+    mixedDoublesPartnerStudentId: {
+      type: String,
+      default: '',
+      trim: true,
+      uppercase: true
     },
     status: {
       type: String,

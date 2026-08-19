@@ -6,29 +6,27 @@ const Match = require('../models/Match');
 const AuditLog = require('../models/AuditLog');
 const User = require('../models/User');
 
+const {
+  enrichRegistrationsWithValidation,
+  getTournamentEntryValidationReport
+} = require('../services/partnerValidationEngine');
+
 // Public / Participant submission
 const submitRegistration = async (req, res, next) => {
   try {
     const {
       fullName,
       gender,
-      studentId,
-      email,
-      phone,
       department,
       doublesPartnerName,
       mixedDoublesPartnerName,
       tournamentId
     } = req.body;
 
-    if (!fullName || !gender || !studentId || !email || !phone || !department) {
-      return res.status(400).json({ success: false, message: 'All personal fields are required.' });
-    }
-
-    if (!doublesPartnerName || !mixedDoublesPartnerName) {
+    if (!fullName || !gender || !department) {
       return res.status(400).json({
         success: false,
-        message: 'Please provide partner names for Doubles and Mixed Doubles categories.'
+        message: 'Full Legal Name, Gender, and Department are required.'
       });
     }
 
@@ -41,48 +39,53 @@ const submitRegistration = async (req, res, next) => {
 
     // Check if tournament registration is open
     const tourn = await Tournament.findById(tournId);
-    if (tourn.status === 'registration_closed' || tourn.status === 'completed') {
+    if (tourn && (tourn.status === 'registration_closed' || tourn.status === 'completed')) {
       return res.status(400).json({ success: false, message: 'Registration for this tournament is currently closed.' });
     }
 
-    // Upsert or find participant
+    const cleanFullName = fullName.trim();
+    const cleanDepartment = department.trim();
+    const cleanDoublesPartner = (doublesPartnerName || '').trim();
+    const cleanMixedPartner = (mixedDoublesPartnerName || '').trim();
+
+    // Find or create participant by Name
     let participant = await Participant.findOne({
-      $or: [{ email: email.toLowerCase().trim() }, { studentId: studentId.toUpperCase().trim() }]
+      fullName: { $regex: new RegExp(`^${cleanFullName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }
     });
 
     if (!participant) {
       participant = await Participant.create({
-        fullName: fullName.trim(),
+        fullName: cleanFullName,
         gender,
-        studentId: studentId.toUpperCase().trim(),
-        email: email.toLowerCase().trim(),
-        phone: phone.trim(),
-        department: department.trim()
+        department: cleanDepartment,
+        isApproved: false
       });
     } else {
-      participant.fullName = fullName.trim();
       participant.gender = gender;
-      participant.phone = phone.trim();
-      participant.department = department.trim();
+      participant.department = cleanDepartment;
       await participant.save();
     }
 
-    // Check if registration already exists
+    // Check if registration already exists for this tournament
     let existingReg = await Registration.findOne({ participantId: participant._id, tournamentId: tournId });
     if (existingReg) {
       existingReg.gender = gender;
-      existingReg.doublesPartnerName = doublesPartnerName.trim();
-      existingReg.mixedDoublesPartnerName = mixedDoublesPartnerName.trim();
+      existingReg.doublesPartnerName = cleanDoublesPartner;
+      existingReg.mixedDoublesPartnerName = cleanMixedPartner;
       await existingReg.save();
-      return res.json({ success: true, message: 'Registration details updated.', registration: existingReg });
+      return res.json({
+        success: true,
+        message: 'Registration details updated successfully.',
+        registration: existingReg
+      });
     }
 
     const registration = await Registration.create({
       participantId: participant._id,
       tournamentId: tournId,
       gender,
-      doublesPartnerName: doublesPartnerName.trim(),
-      mixedDoublesPartnerName: mixedDoublesPartnerName.trim(),
+      doublesPartnerName: cleanDoublesPartner,
+      mixedDoublesPartnerName: cleanMixedPartner,
       status: 'pending'
     });
 
@@ -95,11 +98,6 @@ const submitRegistration = async (req, res, next) => {
     next(error);
   }
 };
-
-const {
-  enrichRegistrationsWithValidation,
-  getTournamentEntryValidationReport
-} = require('../services/partnerValidationEngine');
 
 // Admin: Get all registrations with filtering and partner validation enrichment
 const getAllRegistrations = async (req, res, next) => {
@@ -128,9 +126,10 @@ const getAllRegistrations = async (req, res, next) => {
         if (!p) return false;
         return (
           p.fullName.toLowerCase().includes(s) ||
-          p.studentId.toLowerCase().includes(s) ||
-          p.email.toLowerCase().includes(s) ||
-          p.department.toLowerCase().includes(s)
+          p.department.toLowerCase().includes(s) ||
+          (p.studentId && p.studentId.toLowerCase().includes(s)) ||
+          (r.doublesPartnerName && r.doublesPartnerName.toLowerCase().includes(s)) ||
+          (r.mixedDoublesPartnerName && r.mixedDoublesPartnerName.toLowerCase().includes(s))
         );
       });
     }
@@ -167,25 +166,23 @@ const getMyRegistration = async (req, res, next) => {
     }
 
     const participant = await Participant.findOne({
-      $or: [{ userId: req.user._id }, { email: req.user.email }]
+      $or: [{ userId: req.user._id }, { email: req.user.email }, { fullName: req.user.fullName }]
     });
 
     if (!participant) {
-      return res.status(404).json({ success: false, message: 'No participant record associated with your account.' });
+      return res.status(404).json({ success: false, message: 'No participant record found.' });
     }
 
     const registration = await Registration.findOne({ participantId: participant._id })
       .populate('tournamentId')
       .sort({ createdAt: -1 });
 
-    // Find all teams this participant is part of
     const teams = await Team.find({
       $or: [{ player1: participant._id }, { player2: participant._id }]
     }).populate('player1').populate('player2');
 
     const teamIds = teams.map((t) => t._id);
 
-    // Find all matches for these teams
     const matches = await Match.find({
       $or: [{ team1: { $in: teamIds } }, { team2: { $in: teamIds } }]
     })
@@ -286,13 +283,11 @@ const deleteRegistration = async (req, res, next) => {
     const participant = registration.participantId;
     const participantName = participant ? participant.fullName : 'Unknown';
 
-    // Remove teams associated with this participant
     if (participant) {
       await Team.deleteMany({
         $or: [{ player1: participant._id }, { player2: participant._id }]
       });
 
-      // Remove login user account if exists
       if (participant.userId) {
         await User.findByIdAndDelete(participant.userId);
       }
@@ -300,11 +295,9 @@ const deleteRegistration = async (req, res, next) => {
         await User.deleteMany({ email: participant.email.toLowerCase() });
       }
 
-      // Delete participant record
       await Participant.findByIdAndDelete(participant._id);
     }
 
-    // Delete registration record
     await Registration.findByIdAndDelete(id);
 
     await AuditLog.create({
@@ -315,15 +308,14 @@ const deleteRegistration = async (req, res, next) => {
       entityId: id,
       details: {
         participant: participantName,
-        email: participant?.email,
-        studentId: participant?.studentId
+        department: participant?.department
       },
-      reason: `Admin deleted user/registration for ${participantName}.`
+      reason: `Admin deleted registration for ${participantName}.`
     });
 
     res.json({
       success: true,
-      message: `User and registration for ${participantName} deleted successfully.`
+      message: `Registration for ${participantName} deleted successfully.`
     });
   } catch (error) {
     next(error);

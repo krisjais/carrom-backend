@@ -12,28 +12,24 @@ const participantSchema = new mongoose.Schema(
       enum: ['male', 'female'],
       required: true
     },
-    studentId: {
-      type: String,
-      required: true,
-      unique: true,
-      trim: true,
-      uppercase: true
-    },
-    email: {
-      type: String,
-      required: true,
-      unique: true,
-      trim: true,
-      lowercase: true
-    },
-    phone: {
+    department: {
       type: String,
       required: true,
       trim: true
     },
-    department: {
+    studentId: {
       type: String,
-      required: true,
+      default: '',
+      trim: true
+    },
+    email: {
+      type: String,
+      default: '',
+      trim: true
+    },
+    phone: {
+      type: String,
+      default: '',
       trim: true
     },
     userId: {
