@@ -164,8 +164,55 @@ const deleteTeam = async (req, res, next) => {
   }
 };
 
+// Admin: Delete all teams (optionally by category or across all categories)
+const deleteAllTeams = async (req, res, next) => {
+  try {
+    const { category, tournamentId } = req.query;
+    let query = {};
+    if (category) query.category = category;
+
+    let tournId = tournamentId;
+    if (!tournId) {
+      const activeTourn = await Tournament.findOne().sort({ createdAt: -1 });
+      if (activeTourn) tournId = activeTourn._id;
+    }
+    if (tournId) query.tournamentId = tournId;
+
+    const tournament = await Tournament.findById(tournId);
+    if (category && tournament?.drawsLocked?.[category]) {
+      return res.status(400).json({
+        success: false,
+        message: `Cannot delete teams while the ${category.replace('_', ' ')} draw is locked.`
+      });
+    }
+
+    const deleteResult = await Team.deleteMany(query);
+
+    if (req.user) {
+      await AuditLog.create({
+        action: 'DELETE_ALL_TEAMS',
+        performedBy: req.user._id,
+        performedByName: req.user.fullName,
+        entityType: 'Team',
+        entityId: tournId ? tournId.toString() : 'ALL',
+        details: { category: category || 'all', deletedCount: deleteResult.deletedCount },
+        reason: `Admin deleted all teams in ${category || 'all categories'}`
+      });
+    }
+
+    res.json({
+      success: true,
+      message: `Successfully deleted ${deleteResult.deletedCount} teams/players.`,
+      deletedCount: deleteResult.deletedCount
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   getTeams,
   createDoublesPair,
-  deleteTeam
+  deleteTeam,
+  deleteAllTeams
 };
