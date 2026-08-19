@@ -7,6 +7,7 @@ const AuditLog = require('../models/AuditLog');
 const User = require('../models/User');
 
 const {
+  validatePartnerRequest,
   enrichRegistrationsWithValidation,
   getTournamentEntryValidationReport
 } = require('../services/partnerValidationEngine');
@@ -17,18 +18,32 @@ const submitRegistration = async (req, res, next) => {
     const {
       fullName,
       gender,
+      studentId,
       department,
       doublesPartnerName,
       mixedDoublesPartnerName,
       tournamentId
     } = req.body;
 
-    if (!fullName || !gender || !department) {
+    if (!fullName || !gender || !studentId || !department) {
       return res.status(400).json({
         success: false,
-        message: 'Full Legal Name, Gender, and Department are required.'
+        message: 'Full Legal Name, Gender, Student ID, and Department are required.'
       });
     }
+
+    if (!doublesPartnerName || !mixedDoublesPartnerName) {
+      return res.status(400).json({
+        success: false,
+        message: 'Both Doubles Partner Name and Mixed Doubles Partner Name are required.'
+      });
+    }
+
+    const cleanFullName = fullName.trim();
+    const cleanStudentId = studentId.trim().toUpperCase();
+    const cleanDepartment = department.trim();
+    const cleanDoublesPartner = doublesPartnerName.trim();
+    const cleanMixedPartner = mixedDoublesPartnerName.trim();
 
     let tournId = tournamentId;
     if (!tournId) {
@@ -43,40 +58,41 @@ const submitRegistration = async (req, res, next) => {
       return res.status(400).json({ success: false, message: 'Registration for this tournament is currently closed.' });
     }
 
-    const cleanFullName = fullName.trim();
-    const cleanDepartment = department.trim();
-    const cleanDoublesPartner = (doublesPartnerName || '').trim();
-    const cleanMixedPartner = (mixedDoublesPartnerName || '').trim();
+    // Check if participant already exists by Student ID (Primary Unique Identifier)
+    let participant = await Participant.findOne({ studentId: cleanStudentId });
 
-    // Find or create participant by Name
-    let participant = await Participant.findOne({
-      fullName: { $regex: new RegExp(`^${cleanFullName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }
-    });
+    if (participant) {
+      // Check existing registration
+      const existingReg = await Registration.findOne({ participantId: participant._id, tournamentId: tournId });
 
-    if (!participant) {
+      if (existingReg) {
+        if (existingReg.status === 'approved') {
+          return res.status(400).json({
+            success: false,
+            code: 'REGISTRATION_LOCKED',
+            message: 'REGISTRATION ALREADY EXISTS: This student registration has already been approved and locked. Contact tournament administrators for corrections.',
+            registration: existingReg,
+            participant
+          });
+        }
+
+        // If pending, return pending registration notice without duplicate creation
+        return res.status(200).json({
+          success: true,
+          code: 'REGISTRATION_PENDING',
+          message: 'REGISTRATION ALREADY SUBMITTED: Your tournament entry is currently pending admin approval.',
+          registration: existingReg,
+          participant
+        });
+      }
+    } else {
+      // Create new Participant record
       participant = await Participant.create({
         fullName: cleanFullName,
         gender,
+        studentId: cleanStudentId,
         department: cleanDepartment,
         isApproved: false
-      });
-    } else {
-      participant.gender = gender;
-      participant.department = cleanDepartment;
-      await participant.save();
-    }
-
-    // Check if registration already exists for this tournament
-    let existingReg = await Registration.findOne({ participantId: participant._id, tournamentId: tournId });
-    if (existingReg) {
-      existingReg.gender = gender;
-      existingReg.doublesPartnerName = cleanDoublesPartner;
-      existingReg.mixedDoublesPartnerName = cleanMixedPartner;
-      await existingReg.save();
-      return res.json({
-        success: true,
-        message: 'Registration details updated successfully.',
-        registration: existingReg
       });
     }
 
@@ -91,8 +107,81 @@ const submitRegistration = async (req, res, next) => {
 
     res.status(201).json({
       success: true,
-      message: 'Tournament registration submitted successfully. Admin will verify your entry.',
-      registration
+      code: 'REGISTRATION_SUBMITTED',
+      message: 'Tournament registration submitted successfully. Your entry is now pending admin approval.',
+      registration,
+      participant
+    });
+  } catch (error) {
+    if (error.code === 11000) {
+      return res.status(400).json({
+        success: false,
+        code: 'DUPLICATE_STUDENT_ID',
+        message: 'REGISTRATION ALREADY EXISTS: A registration with this Student ID already exists.'
+      });
+    }
+    next(error);
+  }
+};
+
+// Public Lookup: Check registration and partner status by Student ID
+const lookupRegistrationByStudentId = async (req, res, next) => {
+  try {
+    const { studentId } = req.params;
+    if (!studentId) {
+      return res.status(400).json({ success: false, message: 'Student ID is required.' });
+    }
+
+    const cleanStudentId = studentId.trim().toUpperCase();
+    const participant = await Participant.findOne({ studentId: cleanStudentId });
+
+    if (!participant) {
+      return res.status(404).json({
+        success: false,
+        message: `No registration found for Student ID "${cleanStudentId}".`
+      });
+    }
+
+    const registration = await Registration.findOne({ participantId: participant._id })
+      .populate('tournamentId')
+      .sort({ createdAt: -1 });
+
+    if (!registration) {
+      return res.status(404).json({
+        success: false,
+        message: `No active tournament registration found for ${participant.fullName}.`
+      });
+    }
+
+    const tournId = registration.tournamentId?._id || registration.tournamentId;
+    const doublesCat = participant.gender === 'male' ? 'boys_doubles' : 'girls_doubles';
+
+    const [doublesValidation, mixedDoublesValidation] = await Promise.all([
+      validatePartnerRequest(
+        participant,
+        registration.doublesPartnerName,
+        '',
+        doublesCat,
+        tournId
+      ),
+      validatePartnerRequest(
+        participant,
+        registration.mixedDoublesPartnerName,
+        '',
+        'mixed_doubles',
+        tournId
+      )
+    ]);
+
+    res.json({
+      success: true,
+      participant,
+      registration,
+      doublesValidation,
+      mixedDoublesValidation,
+      events: participant.gender === 'male'
+        ? ['Boys Singles', 'Boys Doubles', 'Mixed Doubles']
+        : ['Girls Singles', 'Girls Doubles', 'Mixed Doubles']
     });
   } catch (error) {
     next(error);
@@ -126,8 +215,8 @@ const getAllRegistrations = async (req, res, next) => {
         if (!p) return false;
         return (
           p.fullName.toLowerCase().includes(s) ||
+          p.studentId.toLowerCase().includes(s) ||
           p.department.toLowerCase().includes(s) ||
-          (p.studentId && p.studentId.toLowerCase().includes(s)) ||
           (r.doublesPartnerName && r.doublesPartnerName.toLowerCase().includes(s)) ||
           (r.mixedDoublesPartnerName && r.mixedDoublesPartnerName.toLowerCase().includes(s))
         );
@@ -271,6 +360,53 @@ const updateRegistrationStatus = async (req, res, next) => {
   }
 };
 
+// Admin: Edit registration details (Admin Override for genuine mistakes)
+const adminEditRegistration = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { fullName, department, doublesPartnerName, mixedDoublesPartnerName, adminNotes } = req.body;
+
+    const registration = await Registration.findById(id).populate('participantId');
+    if (!registration) {
+      return res.status(404).json({ success: false, message: 'Registration record not found.' });
+    }
+
+    if (doublesPartnerName !== undefined) registration.doublesPartnerName = doublesPartnerName.trim();
+    if (mixedDoublesPartnerName !== undefined) registration.mixedDoublesPartnerName = mixedDoublesPartnerName.trim();
+    if (adminNotes !== undefined) registration.adminNotes = adminNotes;
+    await registration.save();
+
+    if (registration.participantId) {
+      const p = registration.participantId;
+      if (fullName) p.fullName = fullName.trim();
+      if (department) p.department = department.trim();
+      await p.save();
+    }
+
+    await AuditLog.create({
+      action: 'ADMIN_EDIT_REGISTRATION',
+      performedBy: req.user._id,
+      performedByName: req.user.fullName,
+      entityType: 'Registration',
+      entityId: registration._id.toString(),
+      details: {
+        participant: registration.participantId?.fullName,
+        doublesPartnerName,
+        mixedDoublesPartnerName
+      },
+      reason: 'Admin modified registration details.'
+    });
+
+    res.json({
+      success: true,
+      message: 'Registration updated successfully by admin.',
+      registration
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 // Admin: Delete registration and participant
 const deleteRegistration = async (req, res, next) => {
   try {
@@ -308,6 +444,7 @@ const deleteRegistration = async (req, res, next) => {
       entityId: id,
       details: {
         participant: participantName,
+        studentId: participant?.studentId,
         department: participant?.department
       },
       reason: `Admin deleted registration for ${participantName}.`
@@ -324,9 +461,11 @@ const deleteRegistration = async (req, res, next) => {
 
 module.exports = {
   submitRegistration,
+  lookupRegistrationByStudentId,
   getAllRegistrations,
   getMyRegistration,
   updateRegistrationStatus,
+  adminEditRegistration,
   deleteRegistration,
   getValidationSummary
 };
