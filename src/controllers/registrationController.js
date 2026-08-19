@@ -459,6 +459,91 @@ const deleteRegistration = async (req, res, next) => {
   }
 };
 
+// Admin: Bulk delete registrations (selected IDs or all)
+const bulkDeleteRegistrations = async (req, res, next) => {
+  try {
+    const { ids, tournamentId } = req.body || {};
+    let tournId = tournamentId;
+    if (!tournId) {
+      const activeTourn = await Tournament.findOne().sort({ createdAt: -1 });
+      if (activeTourn) tournId = activeTourn._id;
+    }
+
+    let query = {};
+    if (tournId) query.tournamentId = tournId;
+    if (ids && Array.isArray(ids) && ids.length > 0) {
+      query._id = { $in: ids };
+    }
+
+    const registrations = await Registration.find(query).populate('participantId');
+    const count = registrations.length;
+
+    for (const reg of registrations) {
+      const p = reg.participantId;
+      if (p) {
+        await Team.deleteMany({
+          $or: [{ player1: p._id }, { player2: p._id }]
+        });
+
+        if (p.userId) {
+          await User.findByIdAndDelete(p.userId);
+        }
+        if (p.email) {
+          await User.deleteMany({ email: p.email.toLowerCase() });
+        }
+
+        await Participant.findByIdAndDelete(p._id);
+      }
+      await Registration.findByIdAndDelete(reg._id);
+    }
+
+    // If deleting all, unlock tournament draws
+    if (!ids || ids.length === 0) {
+      const tournament = await Tournament.findById(tournId);
+      if (tournament) {
+        tournament.drawsLocked = {
+          boys_singles: false,
+          girls_singles: false,
+          boys_doubles: false,
+          girls_doubles: false,
+          mixed_doubles: false
+        };
+        tournament.drawsPublished = {
+          boys_singles: false,
+          girls_singles: false,
+          boys_doubles: false,
+          girls_doubles: false,
+          mixed_doubles: false
+        };
+        tournament.markModified('drawsLocked');
+        tournament.markModified('drawsPublished');
+        await tournament.save();
+      }
+      await Match.deleteMany({ tournamentId: tournId });
+    }
+
+    if (req.user) {
+      await AuditLog.create({
+        action: 'BULK_DELETE_REGISTRATIONS',
+        performedBy: req.user._id,
+        performedByName: req.user.fullName,
+        entityType: 'Registration',
+        entityId: tournId ? tournId.toString() : 'ALL',
+        details: { deletedCount: count },
+        reason: `Admin bulk deleted ${count} registrations and participant records.`
+      });
+    }
+
+    res.json({
+      success: true,
+      message: `Successfully deleted ${count} participant registration(s).`,
+      deletedCount: count
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   submitRegistration,
   lookupRegistrationByStudentId,
@@ -467,5 +552,6 @@ module.exports = {
   updateRegistrationStatus,
   adminEditRegistration,
   deleteRegistration,
+  bulkDeleteRegistrations,
   getValidationSummary
 };

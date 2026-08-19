@@ -1,6 +1,7 @@
 const Team = require('../models/Team');
 const Participant = require('../models/Participant');
 const Tournament = require('../models/Tournament');
+const Registration = require('../models/Registration');
 const AuditLog = require('../models/AuditLog');
 
 // Get teams with optional category filter
@@ -141,6 +142,8 @@ const createDoublesPair = async (req, res, next) => {
   }
 };
 
+const Match = require('../models/Match');
+
 // Admin: Delete a team
 const deleteTeam = async (req, res, next) => {
   try {
@@ -150,15 +153,35 @@ const deleteTeam = async (req, res, next) => {
       return res.status(404).json({ success: false, message: 'Team not found.' });
     }
 
-    // Check if draw is locked
     const tournament = await Tournament.findById(team.tournamentId);
-    if (tournament && tournament.drawsLocked && tournament.drawsLocked[team.category]) {
-      return res.status(400).json({ success: false, message: 'Cannot delete team after draw has been locked.' });
+    if (tournament) {
+      // If draw was locked/generated, unlock and remove uncompleted matches for this category
+      if (tournament.drawsLocked && tournament.drawsLocked[team.category]) {
+        tournament.drawsLocked[team.category] = false;
+        if (tournament.drawsPublished) tournament.drawsPublished[team.category] = false;
+        tournament.markModified('drawsLocked');
+        tournament.markModified('drawsPublished');
+        await tournament.save();
+      }
+      // Remove matches for this category so bracket can be cleanly re-generated
+      await Match.deleteMany({ tournamentId: tournament._id, category: team.category });
     }
 
     await Team.findByIdAndDelete(id);
 
-    res.json({ success: true, message: 'Team removed successfully.' });
+    if (req.user) {
+      await AuditLog.create({
+        action: 'DELETE_TEAM',
+        performedBy: req.user._id,
+        performedByName: req.user.fullName,
+        entityType: 'Team',
+        entityId: id,
+        details: { teamName: team.name, category: team.category },
+        reason: `Admin deleted team ${team.name}`
+      });
+    }
+
+    res.json({ success: true, message: `Team "${team.name}" removed successfully.` });
   } catch (error) {
     next(error);
   }
@@ -179,11 +202,33 @@ const deleteAllTeams = async (req, res, next) => {
     if (tournId) query.tournamentId = tournId;
 
     const tournament = await Tournament.findById(tournId);
-    if (category && tournament?.drawsLocked?.[category]) {
-      return res.status(400).json({
-        success: false,
-        message: `Cannot delete teams while the ${category.replace('_', ' ')} draw is locked.`
-      });
+    if (tournament) {
+      if (category) {
+        if (!tournament.drawsLocked) tournament.drawsLocked = {};
+        if (!tournament.drawsPublished) tournament.drawsPublished = {};
+        tournament.drawsLocked[category] = false;
+        tournament.drawsPublished[category] = false;
+        tournament.markModified('drawsLocked');
+        tournament.markModified('drawsPublished');
+        await tournament.save();
+
+        // Clean up matches for this category
+        await Match.deleteMany({ tournamentId: tournId, category });
+      } else {
+        const categories = ['boys_singles', 'girls_singles', 'boys_doubles', 'girls_doubles', 'mixed_doubles'];
+        if (!tournament.drawsLocked) tournament.drawsLocked = {};
+        if (!tournament.drawsPublished) tournament.drawsPublished = {};
+        categories.forEach((c) => {
+          tournament.drawsLocked[c] = false;
+          tournament.drawsPublished[c] = false;
+        });
+        tournament.markModified('drawsLocked');
+        tournament.markModified('drawsPublished');
+        await tournament.save();
+
+        // Clean up all matches across tournament
+        await Match.deleteMany({ tournamentId: tournId });
+      }
     }
 
     const deleteResult = await Team.deleteMany(query);
@@ -210,9 +255,135 @@ const deleteAllTeams = async (req, res, next) => {
   }
 };
 
+// Admin: Auto-populate teams from approved registrations
+const autoPopulateTeams = async (req, res, next) => {
+  try {
+    const { category, tournamentId } = req.body;
+    let tournId = tournamentId;
+    if (!tournId) {
+      const activeTourn = await Tournament.findOne().sort({ createdAt: -1 });
+      if (!activeTourn) return res.status(400).json({ success: false, message: 'No active tournament found.' });
+      tournId = activeTourn._id;
+    }
+
+    const approvedRegistrations = await Registration.find({
+      tournamentId: tournId,
+      status: 'approved'
+    }).populate('participantId');
+
+    let createdCount = 0;
+
+    for (const reg of approvedRegistrations) {
+      const p = reg.participantId;
+      if (!p) continue;
+
+      const singlesCat = p.gender === 'male' ? 'boys_singles' : 'girls_singles';
+
+      if (!category || category === singlesCat) {
+        const existingSingles = await Team.findOne({
+          tournamentId: tournId,
+          category: singlesCat,
+          player1: p._id
+        });
+
+        if (!existingSingles) {
+          await Team.create({
+            name: p.fullName,
+            tournamentId: tournId,
+            category: singlesCat,
+            player1: p._id,
+            player2: null,
+            isApproved: true
+          });
+          createdCount++;
+        }
+      }
+    }
+
+    // If doubles or mixed requested or all categories
+    if (!category || category.includes('doubles')) {
+      const { enrichRegistrationsWithValidation } = require('../services/partnerValidationEngine');
+      const enriched = await enrichRegistrationsWithValidation(approvedRegistrations, tournId);
+
+      for (const reg of enriched) {
+        const p1 = reg.participantId;
+        if (!p1) continue;
+
+        // Doubles
+        if ((!category || category === 'boys_doubles' || category === 'girls_doubles') && reg.doublesValidation?.isMatched) {
+          const p2 = reg.doublesValidation.matchedParticipant;
+          const doublesCat = p1.gender === 'male' ? 'boys_doubles' : 'girls_doubles';
+          if (!category || category === doublesCat) {
+            const existingTeam = await Team.findOne({
+              tournamentId: tournId,
+              category: doublesCat,
+              $or: [{ player1: p1._id }, { player2: p1._id }, { player1: p2._id }, { player2: p2._id }]
+            });
+
+            if (!existingTeam) {
+              await Team.create({
+                name: `${p1.fullName} & ${p2.fullName}`,
+                tournamentId: tournId,
+                category: doublesCat,
+                player1: p1._id,
+                player2: p2._id,
+                isApproved: true
+              });
+              createdCount++;
+            }
+          }
+        }
+
+        // Mixed Doubles
+        if ((!category || category === 'mixed_doubles') && reg.mixedValidation?.isMatched) {
+          const p2 = reg.mixedValidation.matchedParticipant;
+          const existingMixed = await Team.findOne({
+            tournamentId: tournId,
+            category: 'mixed_doubles',
+            $or: [{ player1: p1._id }, { player2: p1._id }, { player1: p2._id }, { player2: p2._id }]
+          });
+
+          if (!existingMixed) {
+            await Team.create({
+              name: `${p1.fullName} & ${p2.fullName}`,
+              tournamentId: tournId,
+              category: 'mixed_doubles',
+              player1: p1._id,
+              player2: p2._id,
+              isApproved: true
+            });
+            createdCount++;
+          }
+        }
+      }
+    }
+
+    if (req.user) {
+      await AuditLog.create({
+        action: 'AUTO_POPULATE_TEAMS',
+        performedBy: req.user._id,
+        performedByName: req.user.fullName,
+        entityType: 'Team',
+        entityId: tournId.toString(),
+        details: { category: category || 'all', createdCount },
+        reason: `Admin synced roster from approved registrations`
+      });
+    }
+
+    res.json({
+      success: true,
+      message: `Roster synced successfully! Added ${createdCount} new team entries from approved registrations.`,
+      createdCount
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   getTeams,
   createDoublesPair,
   deleteTeam,
-  deleteAllTeams
+  deleteAllTeams,
+  autoPopulateTeams
 };
