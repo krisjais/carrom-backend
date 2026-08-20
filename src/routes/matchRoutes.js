@@ -5,6 +5,7 @@ const {
   getLiveMatches,
   getMatchById,
   startMatch,
+  stopLiveMatch,
   updateScore,
   confirmMatch,
   correctMatch,
@@ -16,9 +17,11 @@ router.get('/', getMatches);
 router.get('/live', getLiveMatches);
 router.get('/:id', getMatchById);
 router.post('/:id/start', authRequired, adminOnly, startMatch);
+router.post('/:id/stop-live', authRequired, adminOnly, stopLiveMatch);
 router.put('/:id/score', authRequired, adminOnly, updateScore);
 router.post('/:id/confirm', authRequired, adminOnly, confirmMatch);
 router.post('/:id/correct', authRequired, adminOnly, correctMatch);
 router.put('/:id/schedule', authRequired, adminOnly, scheduleMatch);
 
 module.exports = router;
+

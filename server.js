@@ -17,9 +17,11 @@ const statsRoutes = require('./src/routes/statsRoutes');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
+const NODE_ENV = process.env.NODE_ENV || 'development';
 
-// Connect to Database
-connectDB();
+console.log('[Server] Starting...');
+console.log(`[Server] Environment: ${NODE_ENV}`);
+console.log(`[Server] Port: ${PORT}`);
 
 // Middlewares
 const allowedOrigins = [
@@ -54,17 +56,24 @@ app.use(cors({
 app.options('*', cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-if (process.env.NODE_ENV === 'development') {
+if (NODE_ENV === 'development') {
   app.use(morgan('dev'));
 }
 
-// Health check
+// Health check endpoint (Readiness & Liveness)
 app.get('/api/health', (req, res) => {
-  res.json({
-    status: 'online',
-    timestamp: new Date().toISOString(),
-    service: 'Carrom Tournament Management API'
-  });
+  const isReady = connectDB.isDBReady();
+  if (isReady) {
+    return res.status(200).json({
+      status: 'ok',
+      database: 'connected'
+    });
+  } else {
+    return res.status(503).json({
+      status: 'error',
+      database: 'disconnected'
+    });
+  }
 });
 
 // Mount Routes
@@ -88,12 +97,20 @@ app.use('*', (req, res) => {
 // Global Error Handler
 app.use(errorHandler);
 
-app.listen(PORT, () => {
-  console.log(`====================================================`);
-  console.log(` Carrom Tournament API Server running on port ${PORT} `);
-  console.log(` Environment: ${process.env.NODE_ENV || 'development'} `);
-  console.log(` Health check: http://localhost:${PORT}/api/health `);
-  console.log(`====================================================`);
+// Start HTTP server immediately on 0.0.0.0 without waiting for MongoDB
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`[Server] Listening on 0.0.0.0:${PORT}`);
+  console.log(`[Server] Health check: http://localhost:${PORT}/api/health`);
+
+  // Connect to Database asynchronously
+  connectDB().then((conn) => {
+    if (conn) {
+      console.log('[Server] Ready');
+    } else {
+      console.warn('[Server] Running in degraded mode: MongoDB connection pending/failed');
+    }
+  });
 });
 
 module.exports = app;
+

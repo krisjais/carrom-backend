@@ -297,13 +297,72 @@ const scheduleMatch = async (req, res, next) => {
   }
 };
 
+// Admin: Stop LIVE Match (Revert mistakenly started match back to scheduled status)
+const stopLiveMatch = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const match = await Match.findById(id).populate('team1 team2');
+    if (!match) {
+      return res.status(404).json({ success: false, message: 'Match not found.' });
+    }
+
+    if (match.status !== 'live') {
+      return res.status(400).json({
+        success: false,
+        message: `Match #${match.matchNumber} is currently in '${match.status}' status and cannot be stopped from live.`
+      });
+    }
+
+    match.status = 'scheduled';
+    match.actualStartTime = null;
+    match.boards = [
+      { boardNumber: 1, team1Score: 0, team2Score: 0, queenPocketedBy: 'none', queenCovered: false, team1Fouls: 0, team2Fouls: 0, boardWinner: null },
+      { boardNumber: 2, team1Score: 0, team2Score: 0, queenPocketedBy: 'none', queenCovered: false, team1Fouls: 0, team2Fouls: 0, boardWinner: null },
+      { boardNumber: 3, team1Score: 0, team2Score: 0, queenPocketedBy: 'none', queenCovered: false, team1Fouls: 0, team2Fouls: 0, boardWinner: null }
+    ];
+    match.finalScore = { team1BoardsWon: 0, team2BoardsWon: 0 };
+    match.winnerTeam = null;
+
+    await match.save();
+
+    // Recalculate estimated times for remaining queue
+    await recalculateEstimatedTimes(match.tournamentId);
+
+    await AuditLog.create({
+      action: 'STOP_LIVE_MATCH',
+      performedBy: req.user._id,
+      performedByName: req.user.fullName || 'Admin',
+      entityType: 'Match',
+      entityId: match._id.toString(),
+      details: {
+        matchNumber: match.matchNumber,
+        category: match.category,
+        roundName: match.roundName,
+        team1: match.team1?.name,
+        team2: match.team2?.name
+      },
+      reason: `Admin stopped live match #${match.matchNumber} and returned it to scheduled queue.`
+    });
+
+    res.json({
+      success: true,
+      message: `Match #${match.matchNumber} has been stopped from LIVE and returned to the scheduled queue.`,
+      match
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   getMatches,
   getLiveMatches,
   getMatchById,
   startMatch,
+  stopLiveMatch,
   updateScore,
   confirmMatch,
   correctMatch,
   scheduleMatch
 };
+
