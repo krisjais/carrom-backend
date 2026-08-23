@@ -14,10 +14,8 @@ const participantSchema = new mongoose.Schema(
     },
     studentId: {
       type: String,
-      required: true,
-      unique: true,
-      trim: true,
-      uppercase: true
+      default: '',
+      trim: true
     },
     department: {
       type: String,

@@ -53,7 +53,6 @@ const registerParticipant = async (req, res, next) => {
     const {
       fullName,
       gender,
-      studentId,
       email,
       phone,
       department,
@@ -63,28 +62,31 @@ const registerParticipant = async (req, res, next) => {
       tournamentId
     } = req.body;
 
-    if (!fullName || !gender || !studentId || !email || !phone || !department || !password) {
+    if (!fullName || !gender || !email || !phone || !department || !password) {
       return res.status(400).json({ success: false, message: 'All profile fields and password are required.' });
     }
 
-    // Check existing email / studentId
+    // Check existing email
     const existingUser = await User.findOne({ email: email.toLowerCase().trim() });
     if (existingUser) {
       return res.status(400).json({ success: false, message: 'An account with this email already exists.' });
     }
 
     const existingParticipant = await Participant.findOne({
-      $or: [{ email: email.toLowerCase().trim() }, { studentId: studentId.toUpperCase().trim() }]
+      $or: [
+        { email: email.toLowerCase().trim() },
+        { fullName: { $regex: new RegExp(`^${fullName.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') } }
+      ]
     });
     if (existingParticipant) {
-      return res.status(400).json({ success: false, message: 'A participant with this email or Student ID already exists.' });
+      return res.status(400).json({ success: false, message: 'A participant with this email or name already exists.' });
     }
 
     // 1. Create Participant
     const participant = await Participant.create({
       fullName: fullName.trim(),
       gender,
-      studentId: studentId.toUpperCase().trim(),
+      studentId: '',
       email: email.toLowerCase().trim(),
       phone: phone.trim(),
       department: department.trim(),

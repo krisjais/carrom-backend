@@ -15,7 +15,7 @@ const { authRequired, adminOnly } = require('../middleware/auth');
 
 // Public endpoints
 router.post('/', submitRegistration);
-router.get('/lookup/:studentId', lookupRegistrationByStudentId);
+router.get('/lookup/:query', lookupRegistrationByStudentId);
 
 // Admin & Auth protected endpoints
 router.get('/', authRequired, adminOnly, getAllRegistrations);
