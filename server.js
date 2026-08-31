@@ -112,9 +112,43 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`[Server] Health check: http://localhost:${PORT}/api/health`);
 
   // Connect to Database asynchronously
-  connectDB().then((conn) => {
+  connectDB().then(async (conn) => {
     if (conn) {
       console.log('[Server] Ready');
+      // Auto-ensure admin user exists in DB
+      try {
+        const User = require('./src/models/User');
+        const adminEmail = (process.env.ADMIN_EMAIL || 'admin@carrom.edu').toLowerCase().trim();
+        const adminPassword = process.env.ADMIN_PASSWORD || 'admincarrom2026';
+        let admin = await User.findOne({ email: adminEmail });
+        if (!admin) {
+          await User.create({
+            username: 'admin',
+            email: adminEmail,
+            password: adminPassword,
+            role: 'admin',
+            fullName: process.env.ADMIN_NAME || 'Tournament Director'
+          });
+          console.log(`[Server] Admin account initialized: ${adminEmail}`);
+        } else {
+          let updated = false;
+          if (admin.role !== 'admin') {
+            admin.role = 'admin';
+            updated = true;
+          }
+          const isMatch = await admin.comparePassword(adminPassword);
+          if (!isMatch) {
+            admin.password = adminPassword;
+            updated = true;
+          }
+          if (updated) {
+            await admin.save();
+            console.log(`[Server] Admin credentials synchronized: ${adminEmail}`);
+          }
+        }
+      } catch (adminErr) {
+        console.warn('[Server] Note on admin user check:', adminErr.message);
+      }
     } else {
       console.warn('[Server] Running in degraded mode: MongoDB connection pending/failed');
     }
