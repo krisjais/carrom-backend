@@ -60,6 +60,15 @@ if (NODE_ENV === 'development') {
   app.use(morgan('dev'));
 }
 
+// Root endpoint (for Render & UptimeRobot keep-alive pings)
+app.get('/', (req, res) => {
+  res.status(200).json({
+    status: 'online',
+    message: 'Carrom Tournament Management API is running',
+    timestamp: new Date().toISOString()
+  });
+});
+
 // Health check endpoint (Readiness & Liveness)
 app.get('/api/health', (req, res) => {
   const isReady = connectDB.isDBReady();
