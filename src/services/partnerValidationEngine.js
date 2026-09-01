@@ -368,8 +368,141 @@ const getTournamentEntryValidationReport = async (tournamentId) => {
   };
 };
 
+/**
+ * Synchronizes Singles entries and auto-pairs approved Doubles & Mixed Doubles teams
+ */
+const syncAndAutoPairTournamentEntries = async (tournamentId, category = null) => {
+  const Tournament = require('../models/Tournament');
+  let tournId = tournamentId;
+  if (!tournId) {
+    const activeTourn = await Tournament.findOne().sort({ createdAt: -1 });
+    if (!activeTourn) return { success: false, createdCount: 0, message: 'No active tournament found.' };
+    tournId = activeTourn._id;
+  }
+
+  const approvedRegistrations = await Registration.find({
+    tournamentId: tournId,
+    status: 'approved'
+  }).populate('participantId');
+
+  let createdCount = 0;
+
+  // 1. Sync Singles Entries for all approved participants
+  for (const reg of approvedRegistrations) {
+    const p = reg.participantId;
+    if (!p || !p.isApproved) continue;
+
+    const singlesCat = p.gender === 'male' ? 'boys_singles' : 'girls_singles';
+
+    if (!category || category === singlesCat) {
+      const existingSingles = await Team.findOne({
+        tournamentId: tournId,
+        category: singlesCat,
+        player1: p._id
+      });
+
+      if (!existingSingles) {
+        await Team.create({
+          name: p.fullName,
+          tournamentId: tournId,
+          category: singlesCat,
+          player1: p._id,
+          player2: null,
+          isApproved: true
+        });
+        createdCount++;
+      }
+    }
+  }
+
+  // 2. Sync Doubles & Mixed Doubles Teams
+  if (!category || category.includes('doubles')) {
+    const enriched = await enrichRegistrationsWithValidation(approvedRegistrations, tournId);
+
+    for (const reg of enriched) {
+      const p1 = reg.participantId;
+      if (!p1 || !p1.isApproved) continue;
+
+      // Doubles (Boys Doubles or Girls Doubles)
+      if (
+        (!category || category === 'boys_doubles' || category === 'girls_doubles') &&
+        reg.doublesValidation?.partner &&
+        reg.doublesValidation.partner.isApproved
+      ) {
+        const p2 = reg.doublesValidation.partner;
+        const doublesCat = p1.gender === 'male' ? 'boys_doubles' : 'girls_doubles';
+
+        if ((!category || category === doublesCat) && p1.gender === p2.gender && p1._id.toString() !== p2._id.toString()) {
+          const existingTeam = await Team.findOne({
+            tournamentId: tournId,
+            category: doublesCat,
+            $or: [
+              { player1: p1._id },
+              { player2: p1._id },
+              { player1: p2._id },
+              { player2: p2._id }
+            ]
+          });
+
+          if (!existingTeam) {
+            await Team.create({
+              name: `${p1.fullName} & ${p2.fullName}`,
+              tournamentId: tournId,
+              category: doublesCat,
+              player1: p1._id,
+              player2: p2._id,
+              isApproved: true
+            });
+            createdCount++;
+          }
+        }
+      }
+
+      // Mixed Doubles
+      if (
+        (!category || category === 'mixed_doubles') &&
+        reg.mixedDoublesValidation?.partner &&
+        reg.mixedDoublesValidation.partner.isApproved
+      ) {
+        const p2 = reg.mixedDoublesValidation.partner;
+        const isMixedGenders =
+          (p1.gender === 'male' && p2.gender === 'female') ||
+          (p1.gender === 'female' && p2.gender === 'male');
+
+        if (isMixedGenders && p1._id.toString() !== p2._id.toString()) {
+          const existingMixed = await Team.findOne({
+            tournamentId: tournId,
+            category: 'mixed_doubles',
+            $or: [
+              { player1: p1._id },
+              { player2: p1._id },
+              { player1: p2._id },
+              { player2: p2._id }
+            ]
+          });
+
+          if (!existingMixed) {
+            await Team.create({
+              name: `${p1.fullName} & ${p2.fullName}`,
+              tournamentId: tournId,
+              category: 'mixed_doubles',
+              player1: p1._id,
+              player2: p2._id,
+              isApproved: true
+            });
+            createdCount++;
+          }
+        }
+      }
+    }
+  }
+
+  return { success: true, createdCount };
+};
+
 module.exports = {
   validatePartnerRequest,
   enrichRegistrationsWithValidation,
-  getTournamentEntryValidationReport
+  getTournamentEntryValidationReport,
+  syncAndAutoPairTournamentEntries
 };

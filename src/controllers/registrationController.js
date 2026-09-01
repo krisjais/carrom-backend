@@ -332,33 +332,15 @@ const updateRegistrationStatus = async (req, res, next) => {
     if (adminNotes !== undefined) registration.adminNotes = adminNotes;
     await registration.save();
 
-    // If approved, update participant approved status
+    // If approved, update participant approved status and auto-pair all entries
     if (registration.participantId) {
       await Participant.findByIdAndUpdate(registration.participantId._id, {
         isApproved: status === 'approved'
       });
 
-      // Auto-create Singles Team record if approved
       if (status === 'approved') {
-        const p = registration.participantId;
-        const singlesCategory = p.gender === 'male' ? 'boys_singles' : 'girls_singles';
-
-        const existingSinglesTeam = await Team.findOne({
-          tournamentId: registration.tournamentId,
-          category: singlesCategory,
-          player1: p._id
-        });
-
-        if (!existingSinglesTeam) {
-          await Team.create({
-            name: p.fullName,
-            tournamentId: registration.tournamentId,
-            category: singlesCategory,
-            player1: p._id,
-            player2: null,
-            isApproved: true
-          });
-        }
+        const { syncAndAutoPairTournamentEntries } = require('../services/partnerValidationEngine');
+        await syncAndAutoPairTournamentEntries(registration.tournamentId);
       }
     }
 

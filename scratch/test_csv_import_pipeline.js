@@ -50,6 +50,7 @@ async function runTests() {
   // Clean up prior test data
   const testNames = sampleCSVPlayers.map(p => p.fullName);
   testNames.push('Manual Test Player');
+  testNames.push('Specific Player One');
   const existingParts = await Participant.find({ fullName: { $in: testNames } });
   const partIds = existingParts.map(p => p._id);
   await Team.deleteMany({ tournamentId: tournament._id, $or: [{ player1: { $in: partIds } }, { player2: { $in: partIds } }] });
@@ -233,16 +234,57 @@ async function runTests() {
   }
   console.log('✓ Test 15 Passed: Admin individual player addition successfully created player and registration with partner requests.');
 
+  // Test 16: Auto-pairing and Roster Sync for Doubles and Mixed Doubles
+  console.log('\n--- Test 16: Auto-Pairing and Sync for Doubles & Mixed Doubles ---');
+  const { syncAndAutoPairTournamentEntries } = require('../src/services/partnerValidationEngine');
+  
+  // Approve all test registrations
+  const currentParticipants = await Participant.find({ fullName: { $in: testNames } });
+  const participantIds = currentParticipants.map(p => p._id);
+  await Registration.updateMany({ tournamentId: tournament._id, participantId: { $in: participantIds } }, { status: 'approved' });
+  await Participant.updateMany({ _id: { $in: participantIds } }, { isApproved: true });
+  
+  await syncAndAutoPairTournamentEntries(tournament._id);
+  
+  const boysDoublesCount = await Team.countDocuments({ tournamentId: tournament._id, category: 'boys_doubles' });
+  const girlsDoublesCount = await Team.countDocuments({ tournamentId: tournament._id, category: 'girls_doubles' });
+  const mixedDoublesCount = await Team.countDocuments({ tournamentId: tournament._id, category: 'mixed_doubles' });
+  
+  console.log(`Boys Doubles Teams: ${boysDoublesCount}, Girls Doubles Teams: ${girlsDoublesCount}, Mixed Doubles Teams: ${mixedDoublesCount}`);
+  if (boysDoublesCount < 2 || girlsDoublesCount < 2 || mixedDoublesCount < 2) {
+    throw new Error(`Doubles auto-pairing incomplete: Boys=${boysDoublesCount}, Girls=${girlsDoublesCount}, Mixed=${mixedDoublesCount}`);
+  }
+  console.log('✓ Test 16 Passed: Doubles and Mixed Doubles teams automatically created and paired from approved registrations.');
+
+  // Test 17: Match / Bracket Generation across All Categories
+  console.log('\n--- Test 17: Generating Knockout Bracket Draws & Matches ---');
+  const { generateCategoryDraw } = require('../src/controllers/drawController');
+  const Match = require('../src/models/Match');
+  
+  let mockDrawReq = {
+    body: { category: 'boys_doubles', tournamentId: tournament._id },
+    user: { _id: new mongoose.Types.ObjectId(), fullName: 'Admin' }
+  };
+  let mockDrawRes = { status: function(c) { this.statusCode = c; return this; }, json: function(d) { this.data = d; } };
+  await generateCategoryDraw(mockDrawReq, mockDrawRes, () => {});
+  
+  const doublesMatches = await Match.find({ tournamentId: tournament._id, category: 'boys_doubles' });
+  if (doublesMatches.length === 0) {
+    throw new Error('No matches generated for boys_doubles');
+  }
+  console.log(`✓ Test 17 Passed: Generated ${doublesMatches.length} knockout matches for Boys Doubles.`);
+
   console.log('\n=====================================================');
-  console.log('🎉 ALL 15 AUTOMATED BACKEND TESTS PASSED (100%) 🎉');
+  console.log('🎉 ALL 17 AUTOMATED BACKEND TESTS PASSED (100%) 🎉');
   console.log('=====================================================\n');
 
   // Clean up test data
   testNames.push('Specific Player One');
   const finalExisting = await Participant.find({ fullName: { $in: testNames } });
   const finalIds = finalExisting.map(p => p._id);
-  await Team.deleteMany({ tournamentId: tournament._id, $or: [{ player1: { $in: finalIds } }, { player2: { $in: finalIds } }] });
-  await Registration.deleteMany({ tournamentId: tournament._id, participantId: { $in: finalIds } });
+  await Match.deleteMany({ tournamentId: tournament._id });
+  await Team.deleteMany({ tournamentId: tournament._id });
+  await Registration.deleteMany({ tournamentId: tournament._id });
   await Participant.deleteMany({ _id: { $in: finalIds } });
 
   await mongoose.disconnect();

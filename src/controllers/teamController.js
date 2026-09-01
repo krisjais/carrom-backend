@@ -266,97 +266,10 @@ const autoPopulateTeams = async (req, res, next) => {
       tournId = activeTourn._id;
     }
 
-    const approvedRegistrations = await Registration.find({
-      tournamentId: tournId,
-      status: 'approved'
-    }).populate('participantId');
+    const { syncAndAutoPairTournamentEntries } = require('../services/partnerValidationEngine');
+    const result = await syncAndAutoPairTournamentEntries(tournId, category);
 
-    let createdCount = 0;
-
-    for (const reg of approvedRegistrations) {
-      const p = reg.participantId;
-      if (!p) continue;
-
-      const singlesCat = p.gender === 'male' ? 'boys_singles' : 'girls_singles';
-
-      if (!category || category === singlesCat) {
-        const existingSingles = await Team.findOne({
-          tournamentId: tournId,
-          category: singlesCat,
-          player1: p._id
-        });
-
-        if (!existingSingles) {
-          await Team.create({
-            name: p.fullName,
-            tournamentId: tournId,
-            category: singlesCat,
-            player1: p._id,
-            player2: null,
-            isApproved: true
-          });
-          createdCount++;
-        }
-      }
-    }
-
-    // If doubles or mixed requested or all categories
-    if (!category || category.includes('doubles')) {
-      const { enrichRegistrationsWithValidation } = require('../services/partnerValidationEngine');
-      const enriched = await enrichRegistrationsWithValidation(approvedRegistrations, tournId);
-
-      for (const reg of enriched) {
-        const p1 = reg.participantId;
-        if (!p1) continue;
-
-        // Doubles
-        if ((!category || category === 'boys_doubles' || category === 'girls_doubles') && reg.doublesValidation?.isMatched) {
-          const p2 = reg.doublesValidation.matchedParticipant;
-          const doublesCat = p1.gender === 'male' ? 'boys_doubles' : 'girls_doubles';
-          if (!category || category === doublesCat) {
-            const existingTeam = await Team.findOne({
-              tournamentId: tournId,
-              category: doublesCat,
-              $or: [{ player1: p1._id }, { player2: p1._id }, { player1: p2._id }, { player2: p2._id }]
-            });
-
-            if (!existingTeam) {
-              await Team.create({
-                name: `${p1.fullName} & ${p2.fullName}`,
-                tournamentId: tournId,
-                category: doublesCat,
-                player1: p1._id,
-                player2: p2._id,
-                isApproved: true
-              });
-              createdCount++;
-            }
-          }
-        }
-
-        // Mixed Doubles
-        if ((!category || category === 'mixed_doubles') && reg.mixedValidation?.isMatched) {
-          const p2 = reg.mixedValidation.matchedParticipant;
-          const existingMixed = await Team.findOne({
-            tournamentId: tournId,
-            category: 'mixed_doubles',
-            $or: [{ player1: p1._id }, { player2: p1._id }, { player1: p2._id }, { player2: p2._id }]
-          });
-
-          if (!existingMixed) {
-            await Team.create({
-              name: `${p1.fullName} & ${p2.fullName}`,
-              tournamentId: tournId,
-              category: 'mixed_doubles',
-              player1: p1._id,
-              player2: p2._id,
-              isApproved: true
-            });
-            createdCount++;
-          }
-        }
-      }
-    }
+    const createdCount = result.createdCount || 0;
 
     if (req.user) {
       await AuditLog.create({
