@@ -9,7 +9,9 @@ const {
   adminEditRegistration,
   deleteRegistration,
   bulkDeleteRegistrations,
-  getValidationSummary
+  getValidationSummary,
+  importParticipants,
+  adminAddPlayer
 } = require('../controllers/registrationController');
 const { authRequired, adminOnly } = require('../middleware/auth');
 
@@ -21,6 +23,8 @@ router.get('/lookup/:query', lookupRegistrationByStudentId);
 router.get('/', authRequired, adminOnly, getAllRegistrations);
 router.get('/validation-summary', authRequired, adminOnly, getValidationSummary);
 router.get('/my', authRequired, getMyRegistration);
+router.post('/add-player', authRequired, adminOnly, adminAddPlayer);
+router.post('/import', authRequired, adminOnly, importParticipants);
 router.put('/:id/status', authRequired, adminOnly, updateRegistrationStatus);
 router.put('/:id/admin-edit', authRequired, adminOnly, adminEditRegistration);
 router.delete('/bulk-clear', authRequired, adminOnly, bulkDeleteRegistrations);

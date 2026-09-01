@@ -564,6 +564,409 @@ const bulkDeleteRegistrations = async (req, res, next) => {
   }
 };
 
+// Admin: Bulk Import participants from CSV data (Supporting all 5 tournament divisions)
+const importParticipants = async (req, res, next) => {
+  try {
+    const { participants, tournamentId } = req.body || {};
+
+    if (!participants || !Array.isArray(participants) || participants.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'No participant data provided for import.'
+      });
+    }
+
+    let tournId = tournamentId;
+    if (!tournId) {
+      const activeTourn = await Tournament.findOne().sort({ createdAt: -1 });
+      if (!activeTourn) {
+        return res.status(400).json({
+          success: false,
+          message: 'No active tournament found.'
+        });
+      }
+      tournId = activeTourn._id;
+    }
+
+    const imported = [];
+    const skipped = [];
+    const errors = [];
+
+    // Process each participant row
+    for (let i = 0; i < participants.length; i++) {
+      const raw = participants[i];
+      const rowNum = i + 1;
+
+      // Extract and clean fields with flexible alias support
+      const rawName = (raw.fullName || raw.name || raw.athlete || raw.player || '').replace(/\s+/g, ' ').trim();
+      const rawGender = (raw.gender || raw.sex || '').trim().toLowerCase();
+      const rawDept = (raw.department || raw.dept || raw.major || raw.branch || '').replace(/\s+/g, ' ').trim();
+      const rawBoysDoubles = (raw.boysDoublesPartner || raw.boysPartner || raw.boysDoubles || '').replace(/\s+/g, ' ').trim();
+      const rawGirlsDoubles = (raw.girlsDoublesPartner || raw.girlsPartner || raw.girlsDoubles || '').replace(/\s+/g, ' ').trim();
+      const rawMixed = (raw.mixedDoublesPartner || raw.mixedPartner || raw.mixedDoubles || '').replace(/\s+/g, ' ').trim();
+      const rawLegacyDoubles = (raw.doublesPartnerName || raw.doublesPartner || '').replace(/\s+/g, ' ').trim();
+
+      // 1. Validation: Full Name
+      if (!rawName) {
+        errors.push({ row: rowNum, name: 'Unknown', reason: 'Missing Full Name' });
+        continue;
+      }
+
+      // 2. Validation & Normalization: Gender
+      let normalizedGender = '';
+      if (['m', 'male', 'boy', 'boys'].includes(rawGender)) {
+        normalizedGender = 'male';
+      } else if (['f', 'female', 'girl', 'girls'].includes(rawGender)) {
+        normalizedGender = 'female';
+      } else {
+        errors.push({ row: rowNum, name: rawName, reason: `Invalid gender: "${raw.gender}". Must be Male or Female.` });
+        continue;
+      }
+
+      // 3. Validation: Department
+      if (!rawDept) {
+        errors.push({ row: rowNum, name: rawName, reason: 'Missing Department / Major' });
+        continue;
+      }
+
+      // 4. Gender compatibility with Boys/Girls Doubles
+      let assignedDoublesPartner = '';
+      if (normalizedGender === 'male') {
+        if (rawGirlsDoubles) {
+          errors.push({
+            row: rowNum,
+            name: rawName,
+            reason: `Invalid Girls Doubles partner "${rawGirlsDoubles}": Male player cannot participate in Girls Doubles.`
+          });
+          continue;
+        }
+        assignedDoublesPartner = rawBoysDoubles || rawLegacyDoubles;
+      } else {
+        if (rawBoysDoubles) {
+          errors.push({
+            row: rowNum,
+            name: rawName,
+            reason: `Invalid Boys Doubles partner "${rawBoysDoubles}": Female player cannot participate in Boys Doubles.`
+          });
+          continue;
+        }
+        assignedDoublesPartner = rawGirlsDoubles || rawLegacyDoubles;
+      }
+
+      try {
+        // 5. Duplicate Check: Search existing Participant by exact Name (case-insensitive)
+        const escapedName = rawName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        let participant = await Participant.findOne({
+          fullName: { $regex: new RegExp(`^${escapedName}$`, 'i') }
+        });
+
+        if (participant) {
+          // Check if already registered in the current tournament
+          const existingReg = await Registration.findOne({
+            participantId: participant._id,
+            tournamentId: tournId
+          });
+
+          if (existingReg) {
+            if (existingReg.status === 'approved') {
+              // Already approved -> skip to protect locked tournament entries
+              skipped.push({
+                row: rowNum,
+                name: participant.fullName,
+                reason: `Already registered and approved in tournament`
+              });
+              continue;
+            }
+
+            // Pending registration -> update partner nominations and department
+            let regUpdated = false;
+            if (assignedDoublesPartner !== undefined && existingReg.doublesPartnerName !== assignedDoublesPartner) {
+              existingReg.doublesPartnerName = assignedDoublesPartner;
+              regUpdated = true;
+            }
+            if (rawMixed !== undefined && existingReg.mixedDoublesPartnerName !== rawMixed) {
+              existingReg.mixedDoublesPartnerName = rawMixed;
+              regUpdated = true;
+            }
+            if (normalizedGender && existingReg.gender !== normalizedGender) {
+              existingReg.gender = normalizedGender;
+              regUpdated = true;
+            }
+            if (regUpdated) {
+              await existingReg.save();
+            }
+
+            if (rawDept && participant.department !== rawDept) {
+              participant.department = rawDept;
+              await participant.save();
+            }
+
+            imported.push({
+              row: rowNum,
+              name: participant.fullName,
+              gender: normalizedGender,
+              department: participant.department,
+              updated: true
+            });
+            continue;
+          } else {
+            // Participant existed in database from past records, create registration for this tournament
+            await Registration.create({
+              participantId: participant._id,
+              tournamentId: tournId,
+              gender: normalizedGender,
+              doublesPartnerName: assignedDoublesPartner,
+              mixedDoublesPartnerName: rawMixed,
+              status: 'pending'
+            });
+
+            if (rawDept && participant.department !== rawDept) {
+              participant.department = rawDept;
+              await participant.save();
+            }
+
+            imported.push({
+              row: rowNum,
+              name: participant.fullName,
+              gender: normalizedGender,
+              department: participant.department
+            });
+            continue;
+          }
+        }
+
+        // 6. Create new Participant record (Simple profile, no password/login account)
+        participant = await Participant.create({
+          fullName: rawName,
+          gender: normalizedGender,
+          studentId: '',
+          department: rawDept,
+          email: '',
+          phone: '',
+          isApproved: false
+        });
+
+        // 7. Create new Registration record in standard pending status
+        await Registration.create({
+          participantId: participant._id,
+          tournamentId: tournId,
+          gender: normalizedGender,
+          doublesPartnerName: assignedDoublesPartner,
+          mixedDoublesPartnerName: rawMixed,
+          status: 'pending'
+        });
+
+        imported.push({
+          row: rowNum,
+          name: participant.fullName,
+          gender: normalizedGender,
+          department: participant.department
+        });
+      } catch (rowErr) {
+        errors.push({
+          row: rowNum,
+          name: rawName,
+          reason: rowErr.message || 'Database error processing record'
+        });
+      }
+    }
+
+    // 8. Record Admin Audit Log
+    if (req.user) {
+      await AuditLog.create({
+        action: 'IMPORT_PARTICIPANTS',
+        performedBy: req.user._id,
+        performedByName: req.user.fullName,
+        entityType: 'Registration',
+        entityId: tournId.toString(),
+        details: {
+          totalReceived: participants.length,
+          importedCount: imported.length,
+          skippedCount: skipped.length,
+          rejectedCount: errors.length
+        },
+        reason: `Admin imported ${imported.length} player(s) from CSV bulk data across 5 divisions.`
+      });
+    }
+
+    res.json({
+      success: true,
+      message: `Import complete: ${imported.length} players imported, ${skipped.length} duplicates skipped, ${errors.length} rejected.`,
+      summary: {
+        total: participants.length,
+        imported: imported.length,
+        skipped: skipped.length,
+        rejected: errors.length,
+        importedPlayers: imported,
+        skippedPlayers: skipped,
+        errors
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// Admin: Add a single player manually
+const adminAddPlayer = async (req, res, next) => {
+  try {
+    const {
+      fullName,
+      gender,
+      department,
+      boysDoublesPartner,
+      girlsDoublesPartner,
+      doublesPartnerName,
+      mixedDoublesPartnerName,
+      mixedDoublesPartner,
+      tournamentId
+    } = req.body;
+
+    if (!fullName || !gender || !department) {
+      return res.status(400).json({
+        success: false,
+        message: 'Full Name, Gender, and Department are required.'
+      });
+    }
+
+    const cleanName = fullName.replace(/\s+/g, ' ').trim();
+    const cleanDept = department.replace(/\s+/g, ' ').trim();
+    const gLower = gender.toLowerCase().trim();
+    let normalizedGender = '';
+    if (['m', 'male', 'boy', 'boys'].includes(gLower)) normalizedGender = 'male';
+    else if (['f', 'female', 'girl', 'girls'].includes(gLower)) normalizedGender = 'female';
+    else {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid gender "${gender}". Expected Male or Female.`
+      });
+    }
+
+    let assignedDoubles = (normalizedGender === 'male' ? (boysDoublesPartner || doublesPartnerName) : (girlsDoublesPartner || doublesPartnerName)) || '';
+    assignedDoubles = (assignedDoubles || '').replace(/\s+/g, ' ').trim();
+
+    let assignedMixed = (mixedDoublesPartnerName || mixedDoublesPartner || '').replace(/\s+/g, ' ').trim();
+
+    let tournId = tournamentId;
+    if (!tournId) {
+      const activeTourn = await Tournament.findOne().sort({ createdAt: -1 });
+      if (!activeTourn) {
+        return res.status(400).json({ success: false, message: 'No active tournament found.' });
+      }
+      tournId = activeTourn._id;
+    }
+
+    // Check if participant already exists by name
+    const escapedName = cleanName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    let participant = await Participant.findOne({
+      fullName: { $regex: new RegExp(`^${escapedName}$`, 'i') }
+    });
+
+    if (participant) {
+      const existingReg = await Registration.findOne({
+        participantId: participant._id,
+        tournamentId: tournId
+      });
+
+      if (existingReg) {
+        if (existingReg.status === 'approved') {
+          return res.status(400).json({
+            success: false,
+            message: `Athlete "${participant.fullName}" is already registered and approved in this tournament.`
+          });
+        }
+
+        // Update pending registration
+        if (assignedDoubles) existingReg.doublesPartnerName = assignedDoubles;
+        if (assignedMixed) existingReg.mixedDoublesPartnerName = assignedMixed;
+        if (normalizedGender) existingReg.gender = normalizedGender;
+        await existingReg.save();
+
+        if (cleanDept && participant.department !== cleanDept) {
+          participant.department = cleanDept;
+          await participant.save();
+        }
+
+        return res.json({
+          success: true,
+          message: `Player "${participant.fullName}" updated in pending registrations.`,
+          registration: existingReg,
+          participant
+        });
+      } else {
+        // Create registration for this tournament
+        const reg = await Registration.create({
+          participantId: participant._id,
+          tournamentId: tournId,
+          gender: normalizedGender,
+          doublesPartnerName: assignedDoubles,
+          mixedDoublesPartnerName: assignedMixed,
+          status: 'pending'
+        });
+
+        if (cleanDept && participant.department !== cleanDept) {
+          participant.department = cleanDept;
+          await participant.save();
+        }
+
+        return res.json({
+          success: true,
+          message: `Player "${participant.fullName}" added to tournament.`,
+          registration: reg,
+          participant
+        });
+      }
+    }
+
+    // Create new Participant & Registration
+    participant = await Participant.create({
+      fullName: cleanName,
+      gender: normalizedGender,
+      studentId: '',
+      department: cleanDept,
+      email: '',
+      phone: '',
+      isApproved: false
+    });
+
+    const registration = await Registration.create({
+      participantId: participant._id,
+      tournamentId: tournId,
+      gender: normalizedGender,
+      doublesPartnerName: assignedDoubles,
+      mixedDoublesPartnerName: assignedMixed,
+      status: 'pending'
+    });
+
+    if (req.user) {
+      await AuditLog.create({
+        action: 'ADMIN_ADD_PLAYER',
+        performedBy: req.user._id,
+        performedByName: req.user.fullName,
+        entityType: 'Registration',
+        entityId: registration._id.toString(),
+        details: {
+          participant: cleanName,
+          gender: normalizedGender,
+          department: cleanDept,
+          doublesPartnerName: assignedDoubles,
+          mixedDoublesPartnerName: assignedMixed
+        },
+        reason: `Admin manually added player ${cleanName}.`
+      });
+    }
+
+    res.json({
+      success: true,
+      message: `Player "${cleanName}" added successfully.`,
+      registration,
+      participant
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   submitRegistration,
   lookupRegistrationByStudentId,
@@ -573,5 +976,7 @@ module.exports = {
   adminEditRegistration,
   deleteRegistration,
   bulkDeleteRegistrations,
-  getValidationSummary
+  getValidationSummary,
+  importParticipants,
+  adminAddPlayer
 };
