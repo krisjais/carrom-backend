@@ -98,8 +98,19 @@ app.use('/api/matches', matchRoutes);
 app.use('/api/announcements', announcementRoutes);
 app.use('/api/stats', statsRoutes);
 app.use('/api/chess', chessRoutes);
-app.use('/chess', chessRoutes);
 app.use('/api/admin', adminChessRoutes);
+
+// Fallback Route Mounts (in case client environment variable omitted /api)
+app.use('/auth', authRoutes);
+app.use('/tournaments', tournamentRoutes);
+app.use('/registrations', registrationRoutes);
+app.use('/teams', teamRoutes);
+app.use('/draws', drawRoutes);
+app.use('/matches', matchRoutes);
+app.use('/announcements', announcementRoutes);
+app.use('/stats', statsRoutes);
+app.use('/chess', chessRoutes);
+app.use('/admin', adminChessRoutes);
 
 // 404 Route Handler
 app.use('*', (req, res) => {
