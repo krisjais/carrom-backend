@@ -322,7 +322,7 @@ exports.importChessPlayers = async (req, res, next) => {
     const skipped = [];
     const errors = [];
 
-    const targetDefaultStatus = defaultStatus === 'Registered' ? 'Registered' : 'Approved';
+    const targetDefaultStatus = 'Registered';
 
     if (isDbConnected()) {
       const existingPlayers = await ChessPlayer.find().select('email playerId');
@@ -336,7 +336,7 @@ exports.importChessPlayers = async (req, res, next) => {
         const email = (item.email || item.emailAddress || '').trim().toLowerCase();
         const rawDept = item.department || item.dept || item.branch || item.team || '';
         const phone = (item.phone || item.mobile || item.contact || '').trim();
-        const status = item.status ? (['approved', 'Approved'].includes(item.status) ? 'Approved' : 'Registered') : targetDefaultStatus;
+        const status = 'Registered';
 
         if (!fullName) {
           errors.push({ row: rowNum, reason: 'Full Name is required.' });
@@ -362,7 +362,7 @@ exports.importChessPlayers = async (req, res, next) => {
             email: finalEmail,
             phone,
             department,
-            status,
+            status: 'Registered',
             matchesPlayed: 0,
             wins: 0,
             draws: 0,
@@ -385,7 +385,7 @@ exports.importChessPlayers = async (req, res, next) => {
 
       return res.json({
         success: true,
-        message: `Imported ${imported.length} player(s). ${skipped.length} skipped, ${errors.length} failed.`,
+        message: `Imported ${imported.length} player(s) as Registered (Pending Approval). ${skipped.length} skipped, ${errors.length} failed.`,
         data: {
           importedCount: imported.length,
           skippedCount: skipped.length,
@@ -408,7 +408,7 @@ exports.importChessPlayers = async (req, res, next) => {
       const email = (item.email || item.emailAddress || '').trim().toLowerCase();
       const rawDept = item.department || item.dept || item.branch || item.team || '';
       const phone = (item.phone || item.mobile || item.contact || '').trim();
-      const status = item.status ? (['approved', 'Approved'].includes(item.status) ? 'Approved' : 'Registered') : targetDefaultStatus;
+      const status = 'Registered';
 
       if (!fullName) {
         errors.push({ row: rowNum, reason: 'Full Name is required.' });
@@ -433,7 +433,7 @@ exports.importChessPlayers = async (req, res, next) => {
         email: finalEmail,
         phone,
         department,
-        status,
+        status: 'Registered',
         matchesPlayed: 0,
         wins: 0,
         draws: 0,

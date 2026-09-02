@@ -98,6 +98,7 @@ app.use('/api/matches', matchRoutes);
 app.use('/api/announcements', announcementRoutes);
 app.use('/api/stats', statsRoutes);
 app.use('/api/chess', chessRoutes);
+app.use('/chess', chessRoutes);
 app.use('/api/admin', adminChessRoutes);
 
 // 404 Route Handler
