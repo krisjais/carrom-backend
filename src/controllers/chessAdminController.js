@@ -223,6 +223,252 @@ exports.deletePlayer = async (req, res, next) => {
   }
 };
 
+// Admin Bulk Update Player Status
+exports.bulkUpdatePlayerStatus = async (req, res, next) => {
+  try {
+    const { ids, status } = req.body;
+    if (!ids || !Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ success: false, message: 'Player IDs array is required.' });
+    }
+
+    let targetStatus = 'Approved';
+    if (status === 'approved' || status === 'Approved') targetStatus = 'Approved';
+    else if (status === 'rejected' || status === 'Rejected') targetStatus = 'Rejected';
+    else if (status === 'pending' || status === 'Registered') targetStatus = 'Registered';
+    else if (status) targetStatus = status;
+
+    if (isDbConnected()) {
+      await ChessPlayer.updateMany(
+        { _id: { $in: ids } },
+        { $set: { status: targetStatus } }
+      );
+      await recalculateAllStandings();
+
+      return res.json({
+        success: true,
+        message: `Updated status to ${targetStatus} for ${ids.length} player(s).`
+      });
+    }
+
+    ids.forEach(id => {
+      const player = memoryStore.players.find(p => p._id === id || p.playerId === id);
+      if (player) player.status = targetStatus;
+    });
+    await recalculateAllStandings();
+
+    res.json({
+      success: true,
+      message: `Updated status to ${targetStatus} for ${ids.length} player(s).`
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// Admin Bulk Delete Players
+exports.bulkDeletePlayers = async (req, res, next) => {
+  try {
+    const { ids } = req.body;
+    if (!ids || !Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ success: false, message: 'Player IDs array is required.' });
+    }
+
+    if (isDbConnected()) {
+      await ChessMatch.deleteMany({
+        $or: [{ player1: { $in: ids } }, { player2: { $in: ids } }]
+      });
+      await ChessPlayer.deleteMany({ _id: { $in: ids } });
+      await recalculateAllStandings();
+
+      return res.json({
+        success: true,
+        message: `Successfully deleted ${ids.length} player(s).`
+      });
+    }
+
+    memoryStore.players = memoryStore.players.filter(p => !ids.includes(p._id) && !ids.includes(p.playerId));
+    await recalculateAllStandings();
+
+    res.json({
+      success: true,
+      message: `Successfully deleted ${ids.length} player(s).`
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// Helper for department normalization
+const normalizeDepartment = (dept) => {
+  if (!dept) return 'IT Team';
+  const clean = dept.toString().trim().toLowerCase();
+  if (clean.includes('first') || clean.includes('fe') || clean.includes('1st') || clean.includes('fy')) return 'First Year';
+  if (clean.includes('second') || clean.includes('se') || clean.includes('2nd') || clean.includes('sy')) return 'Second Year';
+  if (clean.includes('it') || clean.includes('tech') || clean.includes('comp') || clean.includes('cs') || clean.includes('inf')) return 'IT Team';
+  if (clean.includes('mj') || clean.includes('media') || clean.includes('manage')) return 'MJ Team';
+  if (clean.includes('hr') || clean.includes('human') || clean.includes('resource')) return 'HR Team';
+  return 'IT Team';
+};
+
+// Admin Bulk Import Players from CSV
+exports.importChessPlayers = async (req, res, next) => {
+  try {
+    const { players: rawPlayers, defaultStatus } = req.body;
+    if (!rawPlayers || !Array.isArray(rawPlayers) || rawPlayers.length === 0) {
+      return res.status(400).json({ success: false, message: 'No player data provided for import.' });
+    }
+
+    const imported = [];
+    const skipped = [];
+    const errors = [];
+
+    const targetDefaultStatus = defaultStatus === 'Registered' ? 'Registered' : 'Approved';
+
+    if (isDbConnected()) {
+      const existingPlayers = await ChessPlayer.find().select('email playerId');
+      const existingEmails = new Set(existingPlayers.map(p => p.email.toLowerCase()));
+      let currentMaxCount = existingPlayers.length;
+
+      for (let i = 0; i < rawPlayers.length; i++) {
+        const item = rawPlayers[i];
+        const rowNum = i + 1;
+        const fullName = (item.fullName || item.name || item.player || item.playerName || '').trim();
+        const email = (item.email || item.emailAddress || '').trim().toLowerCase();
+        const rawDept = item.department || item.dept || item.branch || item.team || '';
+        const phone = (item.phone || item.mobile || item.contact || '').trim();
+        const status = item.status ? (['approved', 'Approved'].includes(item.status) ? 'Approved' : 'Registered') : targetDefaultStatus;
+
+        if (!fullName) {
+          errors.push({ row: rowNum, reason: 'Full Name is required.' });
+          continue;
+        }
+
+        // Generate synthetic email if empty
+        const finalEmail = email || `${fullName.toLowerCase().replace(/[^a-z0-9]/g, '')}_${Date.now()}_${i}@chess.edu`;
+
+        if (existingEmails.has(finalEmail)) {
+          skipped.push({ row: rowNum, name: fullName, email: finalEmail, reason: 'Duplicate email already exists.' });
+          continue;
+        }
+
+        currentMaxCount++;
+        const playerId = `CHS-${String(currentMaxCount).padStart(3, '0')}`;
+        const department = normalizeDepartment(rawDept);
+
+        try {
+          const newDoc = await ChessPlayer.create({
+            playerId,
+            fullName,
+            email: finalEmail,
+            phone,
+            department,
+            status,
+            matchesPlayed: 0,
+            wins: 0,
+            draws: 0,
+            losses: 0,
+            byes: 0,
+            materialPoints: 0,
+            tournamentPoints: 0,
+            tieBreakScore: 0,
+            rank: currentMaxCount
+          });
+
+          existingEmails.add(finalEmail);
+          imported.push(newDoc);
+        } catch (saveErr) {
+          errors.push({ row: rowNum, name: fullName, reason: saveErr.message });
+        }
+      }
+
+      await recalculateAllStandings();
+
+      return res.json({
+        success: true,
+        message: `Imported ${imported.length} player(s). ${skipped.length} skipped, ${errors.length} failed.`,
+        data: {
+          importedCount: imported.length,
+          skippedCount: skipped.length,
+          errorCount: errors.length,
+          imported,
+          skipped,
+          errors
+        }
+      });
+    }
+
+    // In-memory fallback
+    const existingEmails = new Set(memoryStore.players.map(p => p.email.toLowerCase()));
+    let currentMaxCount = memoryStore.players.length;
+
+    for (let i = 0; i < rawPlayers.length; i++) {
+      const item = rawPlayers[i];
+      const rowNum = i + 1;
+      const fullName = (item.fullName || item.name || item.player || item.playerName || '').trim();
+      const email = (item.email || item.emailAddress || '').trim().toLowerCase();
+      const rawDept = item.department || item.dept || item.branch || item.team || '';
+      const phone = (item.phone || item.mobile || item.contact || '').trim();
+      const status = item.status ? (['approved', 'Approved'].includes(item.status) ? 'Approved' : 'Registered') : targetDefaultStatus;
+
+      if (!fullName) {
+        errors.push({ row: rowNum, reason: 'Full Name is required.' });
+        continue;
+      }
+
+      const finalEmail = email || `${fullName.toLowerCase().replace(/[^a-z0-9]/g, '')}_${Date.now()}_${i}@chess.edu`;
+
+      if (existingEmails.has(finalEmail)) {
+        skipped.push({ row: rowNum, name: fullName, email: finalEmail, reason: 'Duplicate email already exists.' });
+        continue;
+      }
+
+      currentMaxCount++;
+      const playerId = `CHS-${String(currentMaxCount).padStart(3, '0')}`;
+      const department = normalizeDepartment(rawDept);
+
+      const newPlayer = {
+        _id: `mem_p_${Date.now()}_${i}`,
+        playerId,
+        fullName,
+        email: finalEmail,
+        phone,
+        department,
+        status,
+        matchesPlayed: 0,
+        wins: 0,
+        draws: 0,
+        losses: 0,
+        byes: 0,
+        materialPoints: 0,
+        tournamentPoints: 0,
+        tieBreakScore: 0,
+        rank: currentMaxCount
+      };
+
+      memoryStore.players.push(newPlayer);
+      existingEmails.add(finalEmail);
+      imported.push(newPlayer);
+    }
+
+    await recalculateAllStandings();
+
+    res.json({
+      success: true,
+      message: `Imported ${imported.length} player(s). ${skipped.length} skipped, ${errors.length} failed.`,
+      data: {
+        importedCount: imported.length,
+        skippedCount: skipped.length,
+        errorCount: errors.length,
+        imported,
+        skipped,
+        errors
+      }
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
 // Admin Generate Matches
 exports.generateMatches = async (req, res, next) => {
   try {

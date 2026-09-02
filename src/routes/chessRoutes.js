@@ -28,6 +28,9 @@ router.get('/admin/dashboard', chessAdminAuth, adminCtrl.getDashboardStats);
 // ADMIN PLAYER MANAGEMENT
 // -------------------------------------------------------------
 router.get('/admin/players', chessAdminAuth, adminCtrl.getAdminPlayers);
+router.post('/admin/players/import', chessAdminAuth, adminCtrl.importChessPlayers);
+router.post('/admin/players/bulk-status', chessAdminAuth, adminCtrl.bulkUpdatePlayerStatus);
+router.post('/admin/players/bulk-delete', chessAdminAuth, adminCtrl.bulkDeletePlayers);
 router.put('/admin/players/:id/status', chessAdminAuth, adminCtrl.updatePlayer);
 router.put('/admin/players/:id', chessAdminAuth, adminCtrl.updatePlayer);
 router.patch('/admin/players/:id', chessAdminAuth, adminCtrl.updatePlayer);
