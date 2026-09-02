@@ -67,16 +67,11 @@ const generateRoundPairings = async (roundNumber = null) => {
     const matchId = `CHS-M${String(mCounter++).padStart(3, '0')}`;
 
     const byeMatchData = {
-      _id: `mem_m_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
       matchId,
       round: targetRound,
-      player1: byePlayer,
-      player2: null,
       isBye: true,
-      byePlayer: byePlayer,
       status: 'completed',
       winner: 'player1',
-      winnerPlayer: byePlayer,
       resultType: 'bye',
       player1Score: 3,
       durationMinutes: config.matchDuration || 10,
@@ -94,7 +89,14 @@ const generateRoundPairings = async (roundNumber = null) => {
         winnerPlayer: byePlayer._id
       });
     } else {
-      byeMatch = byeMatchData;
+      byeMatch = {
+        _id: `mem_m_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
+        ...byeMatchData,
+        player1: byePlayer,
+        player2: null,
+        byePlayer: byePlayer,
+        winnerPlayer: byePlayer
+      };
       memoryStore.matches.push(byeMatch);
     }
 
@@ -135,11 +137,8 @@ const generateRoundPairings = async (roundNumber = null) => {
     const matchId = `CHS-M${String(mCounter++).padStart(3, '0')}`;
 
     const matchData = {
-      _id: `mem_m_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
       matchId,
       round: targetRound,
-      player1: p1,
-      player2: p2,
       isBye: false,
       status: 'scheduled',
       scheduledTime: new Date(),
@@ -154,7 +153,12 @@ const generateRoundPairings = async (roundNumber = null) => {
         player2: p2._id
       });
     } else {
-      match = matchData;
+      match = {
+        _id: `mem_m_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
+        ...matchData,
+        player1: p1,
+        player2: p2
+      };
       memoryStore.matches.push(match);
     }
 
