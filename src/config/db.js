@@ -27,6 +27,9 @@ const isDBReady = () => {
   return mongoose.connection.readyState === 1;
 };
 
+// Disable Mongoose buffering so queries don't hang when MongoDB daemon is not running
+mongoose.set('bufferCommands', false);
+
 const connectDB = async () => {
   attachConnectionListeners();
 
@@ -34,7 +37,7 @@ const connectDB = async () => {
 
   const mongoURI = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/carrom_tournament';
   const options = {
-    serverSelectionTimeoutMS: 5000,
+    serverSelectionTimeoutMS: 3000,
     connectTimeoutMS: 10000,
     socketTimeoutMS: 45000,
     maxPoolSize: 10,
@@ -59,10 +62,7 @@ const connectDB = async () => {
 
     return conn;
   } catch (error) {
-    console.error(`[MongoDB] Connection failed: ${error.message}`);
-    // Do not call process.exit(1) so the HTTP server stays up and reports 503 on health check
-    // Mongoose driver will continue connection retry attempts on subsequent queries if configured,
-    // or next connection attempt can be scheduled.
+    console.warn(`[MongoDB] Notice: Database connection unavailable (${error.message}). Running in fallback mode.`);
     return null;
   }
 };
@@ -71,4 +71,5 @@ connectDB.isDBReady = isDBReady;
 connectDB.connectDB = connectDB;
 
 module.exports = connectDB;
+
 

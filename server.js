@@ -71,7 +71,7 @@ app.get('/', (req, res) => {
 
 // Health check endpoint (Readiness & Liveness)
 app.get('/api/health', (req, res) => {
-  const isReady = connectDB.isDBReady();
+  const isReady = connectDB.isDBReady ? connectDB.isDBReady() : false;
   if (isReady) {
     return res.status(200).json({
       status: 'ok',
@@ -85,6 +85,9 @@ app.get('/api/health', (req, res) => {
   }
 });
 
+const chessRoutes = require('./src/routes/chessRoutes');
+const adminChessRoutes = require('./src/routes/adminChessRoutes');
+
 // Mount Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/tournaments', tournamentRoutes);
@@ -94,6 +97,8 @@ app.use('/api/draws', drawRoutes);
 app.use('/api/matches', matchRoutes);
 app.use('/api/announcements', announcementRoutes);
 app.use('/api/stats', statsRoutes);
+app.use('/api/chess', chessRoutes);
+app.use('/api/admin', adminChessRoutes);
 
 // 404 Route Handler
 app.use('*', (req, res) => {
