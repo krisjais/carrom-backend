@@ -15,7 +15,20 @@ const generateRoundPairings = async (roundNumber = null) => {
     ? await ChessPlayer.find({
         status: { $in: ['Approved', 'Active', 'approved', 'active'] }
       }).sort({ tournamentPoints: -1, materialPoints: -1, wins: -1, fullName: 1 })
-    : memoryStore.players.filter(p => ['Approved', 'Active', 'approved', 'active'].includes(p.status));
+    : memoryStore.players
+        .filter(p => ['Approved', 'Active', 'approved', 'active'].includes(p.status))
+        .sort((a, b) => {
+          if ((b.tournamentPoints || 0) !== (a.tournamentPoints || 0)) {
+            return (b.tournamentPoints || 0) - (a.tournamentPoints || 0);
+          }
+          if ((b.materialPoints || 0) !== (a.materialPoints || 0)) {
+            return (b.materialPoints || 0) - (a.materialPoints || 0);
+          }
+          if ((b.wins || 0) !== (a.wins || 0)) {
+            return (b.wins || 0) - (a.wins || 0);
+          }
+          return (a.fullName || '').localeCompare(b.fullName || '');
+        });
 
   if (eligiblePlayers.length < 2) {
     throw new Error('At least 2 approved players are required to generate pairings.');
@@ -46,10 +59,13 @@ const generateRoundPairings = async (roundNumber = null) => {
   const createdMatches = [];
   let mCounter = (isDbConnected ? await ChessMatch.countDocuments() : memoryStore.matches.length) + 1;
 
-  // 2. Handle Odd Number of Players (Assign BYE)
+  // 2. Handle Odd Number of Players:
+  // The player with the MOST points automatically advances to next round via BYE
+  // and will NOT participate in a match pairing for this round.
   if (playerPool.length % 2 !== 0) {
+    // Search from index 0 (highest points) for top-ranked player who hasn't received a BYE
     let byeIndex = -1;
-    for (let i = playerPool.length - 1; i >= 0; i--) {
+    for (let i = 0; i < playerPool.length; i++) {
       const p = playerPool[i];
       const pIdStr = (p._id || p.playerId).toString();
       const hasBye = pastMatches.some(m => m.isBye && (m.byePlayer?._id || m.byePlayer)?.toString() === pIdStr);
@@ -59,12 +75,15 @@ const generateRoundPairings = async (roundNumber = null) => {
       }
     }
 
+    // If all top players already had a bye, pick the top player with most points (index 0)
     if (byeIndex === -1) {
-      byeIndex = playerPool.length - 1;
+      byeIndex = 0;
     }
 
+    // Remove top player from playerPool so they do not participate in matches this round
     const byePlayer = playerPool.splice(byeIndex, 1)[0];
     const matchId = `CHS-M${String(mCounter++).padStart(3, '0')}`;
+    const winPoints = config.tournamentPoints?.win ?? 3;
 
     const byeMatchData = {
       matchId,
@@ -73,11 +92,11 @@ const generateRoundPairings = async (roundNumber = null) => {
       status: 'completed',
       winner: 'player1',
       resultType: 'bye',
-      player1Score: 3,
+      player1Score: winPoints,
       durationMinutes: config.matchDuration || 10,
       actualStartTime: new Date(),
       actualEndTime: new Date(),
-      notes: `Automatic BYE awarded for Round ${targetRound}.`
+      notes: `Automatic BYE awarded for Round ${targetRound}. Top-ranked player (${byePlayer.fullName || byePlayer.playerId}) advances directly to next round.`
     };
 
     let byeMatch;
@@ -102,7 +121,7 @@ const generateRoundPairings = async (roundNumber = null) => {
 
     // Update BYE player stats
     byePlayer.byes = (byePlayer.byes || 0) + 1;
-    byePlayer.tournamentPoints = (byePlayer.tournamentPoints || 0) + (config.tournamentPoints?.win ?? 3);
+    byePlayer.tournamentPoints = (byePlayer.tournamentPoints || 0) + winPoints;
     byePlayer.matchesPlayed = (byePlayer.matchesPlayed || 0) + 1;
     byePlayer.wins = (byePlayer.wins || 0) + 1;
     if (isDbConnected && typeof byePlayer.save === 'function') {
@@ -163,6 +182,49 @@ const generateRoundPairings = async (roundNumber = null) => {
     }
 
     createdMatches.push(match);
+  }
+
+  // Update or create ChessRound record
+  if (isDbConnected) {
+    let roundDoc = await ChessRound.findOne({ roundNumber: targetRound });
+    if (!roundDoc) {
+      await ChessRound.create({
+        roundNumber: targetRound,
+        name: `Round ${targetRound}`,
+        status: 'active',
+        matchesCount: createdMatches.length,
+        startTime: new Date()
+      });
+    } else {
+      roundDoc.matchesCount = createdMatches.length;
+      roundDoc.status = 'active';
+      if (!roundDoc.startTime) roundDoc.startTime = new Date();
+      await roundDoc.save();
+    }
+  } else {
+    let roundItem = memoryStore.rounds.find(r => r.roundNumber === targetRound);
+    if (!roundItem) {
+      memoryStore.rounds.push({
+        _id: `mem_r_${Date.now()}`,
+        roundNumber: targetRound,
+        name: `Round ${targetRound}`,
+        status: 'active',
+        matchesCount: createdMatches.length,
+        startTime: new Date()
+      });
+    } else {
+      roundItem.matchesCount = createdMatches.length;
+      roundItem.status = 'active';
+      if (!roundItem.startTime) roundItem.startTime = new Date();
+    }
+  }
+
+  // Recalculate standings so BYE points and matches played are updated
+  try {
+    const { recalculateAllStandings } = require('./standingsService');
+    await recalculateAllStandings();
+  } catch (err) {
+    console.error('Error recalculating standings post pairing:', err);
   }
 
   return createdMatches;

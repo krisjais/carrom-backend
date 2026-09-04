@@ -441,3 +441,132 @@ exports.resetTournamentData = async (req, res, next) => {
     next(err);
   }
 };
+
+// Admin Create Round (Only requires Round Name; roundNumber is auto-assigned)
+exports.createRound = async (req, res, next) => {
+  try {
+    const { name } = req.body;
+    if (!name || typeof name !== 'string' || !name.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Round name is required.'
+      });
+    }
+
+    const trimmedName = name.trim();
+
+    if (isDbConnected()) {
+      const existingRounds = await ChessRound.find().sort({ roundNumber: -1 }).limit(1);
+      const nextRoundNumber = existingRounds.length > 0 ? existingRounds[0].roundNumber + 1 : 1;
+
+      const newRound = await ChessRound.create({
+        roundNumber: nextRoundNumber,
+        name: trimmedName,
+        status: 'scheduled',
+        matchesCount: 0
+      });
+
+      let config = await ChessConfiguration.findOne();
+      if (config && (!config.currentRound || config.currentRound < nextRoundNumber)) {
+        config.currentRound = nextRoundNumber;
+        await config.save();
+      }
+
+      return res.status(201).json({
+        success: true,
+        message: `Round ${nextRoundNumber} ("${trimmedName}") created successfully.`,
+        data: newRound
+      });
+    }
+
+    const maxRoundNumber = memoryStore.rounds.reduce((max, r) => Math.max(max, r.roundNumber || 0), 0);
+    const nextRoundNumber = maxRoundNumber + 1;
+
+    const newRound = {
+      _id: `mem_round_${Date.now()}`,
+      roundNumber: nextRoundNumber,
+      name: trimmedName,
+      status: 'scheduled',
+      matchesCount: 0,
+      createdAt: new Date(),
+      updatedAt: new Date()
+    };
+
+    memoryStore.rounds.push(newRound);
+    if (!memoryStore.configuration.currentRound || memoryStore.configuration.currentRound < nextRoundNumber) {
+      memoryStore.configuration.currentRound = nextRoundNumber;
+    }
+
+    res.status(201).json({
+      success: true,
+      message: `Round ${nextRoundNumber} ("${trimmedName}") created successfully.`,
+      data: newRound
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// Admin Get Rounds List
+exports.getAdminRounds = async (req, res, next) => {
+  try {
+    if (isDbConnected()) {
+      const rounds = await ChessRound.find().sort({ roundNumber: 1 });
+      return res.json({
+        success: true,
+        count: rounds.length,
+        data: rounds
+      });
+    }
+
+    const rounds = [...memoryStore.rounds].sort((a, b) => a.roundNumber - b.roundNumber);
+    res.json({
+      success: true,
+      count: rounds.length,
+      data: rounds
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// Admin Delete Round
+exports.deleteRound = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+
+    if (isDbConnected()) {
+      const round = await ChessRound.findOne({
+        $or: [{ _id: mongoose.isValidObjectId(id) ? id : null }, { roundNumber: Number(id) || -1 }]
+      });
+
+      if (!round) {
+        return res.status(404).json({ success: false, message: 'Round not found.' });
+      }
+
+      await ChessMatch.deleteMany({ round: round.roundNumber });
+      await ChessRound.findByIdAndDelete(round._id);
+
+      return res.json({
+        success: true,
+        message: `Round ${round.roundNumber} deleted successfully.`
+      });
+    }
+
+    const idx = memoryStore.rounds.findIndex(r => r._id === id || r.roundNumber === Number(id));
+    if (idx === -1) {
+      return res.status(404).json({ success: false, message: 'Round not found.' });
+    }
+
+    const rNum = memoryStore.rounds[idx].roundNumber;
+    memoryStore.rounds.splice(idx, 1);
+    memoryStore.matches = memoryStore.matches.filter(m => m.round !== rNum);
+
+    res.json({
+      success: true,
+      message: `Round ${rNum} deleted successfully.`
+    });
+  } catch (err) {
+    next(err);
+  }
+};

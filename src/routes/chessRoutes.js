@@ -34,6 +34,13 @@ router.patch('/admin/players/:id', chessAdminAuth, adminCtrl.updatePlayer);
 router.delete('/admin/players/:id', chessAdminAuth, adminCtrl.deletePlayer);
 
 // -------------------------------------------------------------
+// ADMIN ROUND MANAGEMENT
+// -------------------------------------------------------------
+router.get('/admin/rounds', chessAdminAuth, adminCtrl.getAdminRounds);
+router.post('/admin/rounds', chessAdminAuth, adminCtrl.createRound);
+router.delete('/admin/rounds/:id', chessAdminAuth, adminCtrl.deleteRound);
+
+// -------------------------------------------------------------
 // ADMIN MATCH MANAGEMENT
 // -------------------------------------------------------------
 router.get('/admin/matches', chessAdminAuth, adminCtrl.getAdminMatches);

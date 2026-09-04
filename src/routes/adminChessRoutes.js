@@ -14,6 +14,14 @@ router.patch('/players/:id', chessAdminAuth, adminCtrl.updatePlayer);
 router.put('/players/:id', chessAdminAuth, adminCtrl.updatePlayer);
 router.delete('/players/:id', chessAdminAuth, adminCtrl.deletePlayer);
 
+// Rounds
+router.get('/rounds', chessAdminAuth, adminCtrl.getAdminRounds);
+router.get('/chess/rounds', chessAdminAuth, adminCtrl.getAdminRounds);
+router.post('/rounds', chessAdminAuth, adminCtrl.createRound);
+router.post('/chess/rounds', chessAdminAuth, adminCtrl.createRound);
+router.delete('/rounds/:id', chessAdminAuth, adminCtrl.deleteRound);
+router.delete('/chess/rounds/:id', chessAdminAuth, adminCtrl.deleteRound);
+
 // Matches
 router.get('/matches', chessAdminAuth, adminCtrl.getAdminMatches);
 router.get('/chess/matches', chessAdminAuth, adminCtrl.getAdminMatches);
