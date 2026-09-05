@@ -41,7 +41,7 @@ const seedDatabase = async () => {
 
     // 2. Create Active Tournament
     const tournament = await Tournament.create({
-      title: 'Annual Inter-College Carrom Championship',
+      title: 'Annual Intra-College Carrom Championship',
       edition: '2026',
       status: 'ongoing',
       scheduleSettings: {

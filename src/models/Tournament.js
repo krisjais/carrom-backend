@@ -5,7 +5,7 @@ const tournamentSchema = new mongoose.Schema(
     title: {
       type: String,
       required: true,
-      default: 'Annual Inter-College Carrom Championship'
+      default: 'Annual Intra-College Carrom Championship'
     },
     edition: {
       type: String,

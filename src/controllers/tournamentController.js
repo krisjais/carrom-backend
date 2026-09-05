@@ -12,7 +12,7 @@ const getCurrentTournament = async (req, res, next) => {
     if (!tournament) {
       // Auto-create default tournament if none exists
       tournament = await Tournament.create({
-        title: 'Annual Inter-College Carrom Championship',
+        title: 'Annual Intra-College Carrom Championship',
         edition: '2026',
         status: 'registration_open',
         boardCount: 6
