@@ -6,6 +6,28 @@ const { recalculateAllStandings } = require('./standingsService');
 
 const isDbConnected = () => mongoose.connection.readyState === 1;
 
+const CHESS_PIECE_LIMITS = {
+  pawns: 8,
+  knights: 2,
+  bishops: 2,
+  rooks: 2,
+  queens: 1,
+  kings: 1
+};
+
+const sanitizeCapturedPieces = (captured = {}) => {
+  if (!captured || typeof captured !== 'object') {
+    return { pawns: 0, knights: 0, bishops: 0, rooks: 0, queens: 0, kings: 0 };
+  }
+  const sanitized = {};
+  for (const [piece, maxLimit] of Object.entries(CHESS_PIECE_LIMITS)) {
+    const val = Number(captured[piece]) || 0;
+    sanitized[piece] = Math.max(0, Math.min(maxLimit, Math.floor(val)));
+  }
+  return sanitized;
+};
+
+
 const startMatch = async (matchId) => {
   if (isDbConnected()) {
     let match = await ChessMatch.findById(matchId);
@@ -101,8 +123,8 @@ const submitResult = async (matchId, resultData) => {
     const match = await ChessMatch.findById(matchId);
     if (!match) throw new Error('Match not found.');
 
-    if (player1Captured) match.player1Captured = player1Captured;
-    if (player2Captured) match.player2Captured = player2Captured;
+    if (player1Captured) match.player1Captured = sanitizeCapturedPieces(player1Captured);
+    if (player2Captured) match.player2Captured = sanitizeCapturedPieces(player2Captured);
 
     const p1MatScore = calculateMaterialScore(match.player1Captured, config);
     const p2MatScore = calculateMaterialScore(match.player2Captured, config);
@@ -132,8 +154,8 @@ const submitResult = async (matchId, resultData) => {
   const match = memoryStore.matches.find(m => m._id === matchId || m.matchId === matchId);
   if (!match) throw new Error('Match not found.');
 
-  if (player1Captured) match.player1Captured = player1Captured;
-  if (player2Captured) match.player2Captured = player2Captured;
+  if (player1Captured) match.player1Captured = sanitizeCapturedPieces(player1Captured);
+  if (player2Captured) match.player2Captured = sanitizeCapturedPieces(player2Captured);
 
   const p1MatScore = calculateMaterialScore(match.player1Captured, config);
   const p2MatScore = calculateMaterialScore(match.player2Captured, config);
@@ -216,8 +238,8 @@ const updateLiveCaptures = async (matchId, captureData) => {
     if (!match) match = await ChessMatch.findOne({ matchId });
     if (!match) throw new Error('Match not found.');
 
-    if (player1Captured) match.player1Captured = player1Captured;
-    if (player2Captured) match.player2Captured = player2Captured;
+    if (player1Captured) match.player1Captured = sanitizeCapturedPieces(player1Captured);
+    if (player2Captured) match.player2Captured = sanitizeCapturedPieces(player2Captured);
 
     match.player1MaterialScore = calculateMaterialScore(match.player1Captured, config);
     match.player2MaterialScore = calculateMaterialScore(match.player2Captured, config);
@@ -239,8 +261,8 @@ const updateLiveCaptures = async (matchId, captureData) => {
   const match = memoryStore.matches.find(m => m._id === matchId || m.matchId === matchId);
   if (!match) throw new Error('Match not found.');
 
-  if (player1Captured) match.player1Captured = player1Captured;
-  if (player2Captured) match.player2Captured = player2Captured;
+  if (player1Captured) match.player1Captured = sanitizeCapturedPieces(player1Captured);
+  if (player2Captured) match.player2Captured = sanitizeCapturedPieces(player2Captured);
 
   match.player1MaterialScore = calculateMaterialScore(match.player1Captured, config);
   match.player2MaterialScore = calculateMaterialScore(match.player2Captured, config);
@@ -260,5 +282,7 @@ module.exports = {
   updateLiveCaptures,
   submitResult,
   overrideResult,
-  cancelMatch
+  cancelMatch,
+  CHESS_PIECE_LIMITS,
+  sanitizeCapturedPieces
 };

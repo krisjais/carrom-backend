@@ -21,8 +21,7 @@ const calculateMaterialScore = (captured = {}, config = null) => {
   const bishops = (captured.bishops || 0) * (piecePoints.bishop ?? 3);
   const rooks = (captured.rooks || 0) * (piecePoints.rook ?? 5);
   const queens = (captured.queens || 0) * (piecePoints.queen ?? 9);
-  // King capture is illegal in chess; always 0 points
-  const kings = 0;
+  const kings = (captured.kings || 0) * (piecePoints.king ?? 0);
 
   return pawns + knights + bishops + rooks + queens + kings;
 };

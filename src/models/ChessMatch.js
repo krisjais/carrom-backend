@@ -6,7 +6,8 @@ const capturedPiecesSchema = new mongoose.Schema(
     knights: { type: Number, default: 0, min: 0, max: 2 },
     bishops: { type: Number, default: 0, min: 0, max: 2 },
     rooks: { type: Number, default: 0, min: 0, max: 2 },
-    queens: { type: Number, default: 0, min: 0, max: 1 }
+    queens: { type: Number, default: 0, min: 0, max: 1 },
+    kings: { type: Number, default: 0, min: 0, max: 1 }
   },
   { _id: false }
 );
@@ -79,11 +80,11 @@ const chessMatchSchema = new mongoose.Schema(
     },
     player1Captured: {
       type: capturedPiecesSchema,
-      default: () => ({ pawns: 0, knights: 0, bishops: 0, rooks: 0, queens: 0 })
+      default: () => ({ pawns: 0, knights: 0, bishops: 0, rooks: 0, queens: 0, kings: 0 })
     },
     player2Captured: {
       type: capturedPiecesSchema,
-      default: () => ({ pawns: 0, knights: 0, bishops: 0, rooks: 0, queens: 0 })
+      default: () => ({ pawns: 0, knights: 0, bishops: 0, rooks: 0, queens: 0, kings: 0 })
     },
     player1MaterialScore: {
       type: Number,
