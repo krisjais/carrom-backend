@@ -172,7 +172,19 @@ const confirmMatchWinner = async (matchId, adminUser, overrideWinnerTeamId = nul
 
   match.winnerTeam = winningTeamId;
   match.status = 'completed';
-  match.actualEndTime = new Date();
+  const now = new Date();
+  match.actualEndTime = now;
+
+  if (match.actualStartTime) {
+    const elapsedSeconds = Math.max(1, Math.floor((now.getTime() - new Date(match.actualStartTime).getTime()) / 1000));
+    match.elapsedTimeSeconds = elapsedSeconds;
+  } else {
+    // If started time wasn't explicitly logged, compute reasonable duration from updatedAt or round duration
+    const defaultMins = match.roundDurationMinutes || match.durationMinutes || 20;
+    match.actualStartTime = new Date(now.getTime() - defaultMins * 60 * 1000);
+    match.elapsedTimeSeconds = defaultMins * 60;
+  }
+
   match.queuePosition = null; // Removed from active READY queue
   match.isResultConfirmed = true;
   match.updatedBy = adminUser._id;

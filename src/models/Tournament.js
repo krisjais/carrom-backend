@@ -24,7 +24,11 @@ const tournamentSchema = new mongoose.Schema(
       },
       matchDurationMinutes: {
         type: Number,
-        default: 30
+        default: 20
+      },
+      roundDurationMinutes: {
+        type: Number,
+        default: 20
       },
       breakTimeMinutes: {
         type: Number,

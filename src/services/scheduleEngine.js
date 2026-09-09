@@ -169,7 +169,7 @@ const recalculateEstimatedTimes = async (tournamentId) => {
   const tournament = await Tournament.findById(tournamentId);
   if (!tournament) return;
 
-  const durationMin = tournament.scheduleSettings?.matchDurationMinutes || 30;
+  const durationMin = tournament.scheduleSettings?.roundDurationMinutes || tournament.scheduleSettings?.matchDurationMinutes || 20;
   const breakMin = tournament.scheduleSettings?.breakTimeMinutes || 5;
   const minRestMin = tournament.scheduleSettings?.minRestTimeMinutes || 10;
   const configuredStart = tournament.scheduleSettings?.startTime ? new Date(tournament.scheduleSettings.startTime) : new Date();
@@ -195,7 +195,8 @@ const recalculateEstimatedTimes = async (tournamentId) => {
 
   if (liveMatch) {
     const liveStart = liveMatch.actualStartTime ? new Date(liveMatch.actualStartTime).getTime() : Date.now();
-    const liveEstEnd = liveStart + durationMin * 60 * 1000;
+    const liveDur = liveMatch.roundDurationMinutes || liveMatch.durationMinutes || durationMin;
+    const liveEstEnd = liveStart + liveDur * 60 * 1000;
     currentBoardTime = new Date(Math.max(Date.now(), liveEstEnd + breakMin * 60 * 1000));
   } else if (lastCompleted && lastCompleted.actualEndTime) {
     const lastEnd = new Date(lastCompleted.actualEndTime).getTime();
@@ -209,6 +210,7 @@ const recalculateEstimatedTimes = async (tournamentId) => {
 
   for (const m of readyMatches) {
     const pIds = getMatchParticipantIds(m);
+    const mDuration = m.roundDurationMinutes || m.durationMinutes || durationMin;
 
     // Earliest time all players in this match are free from previous estimated matches
     let matchEarliestStart = currentBoardTime.getTime();
@@ -223,9 +225,11 @@ const recalculateEstimatedTimes = async (tournamentId) => {
     }
 
     const estimatedStart = new Date(Math.max(currentBoardTime.getTime(), matchEarliestStart));
-    const estimatedEnd = new Date(estimatedStart.getTime() + durationMin * 60 * 1000);
+    const estimatedEnd = new Date(estimatedStart.getTime() + mDuration * 60 * 1000);
 
     m.scheduledTime = estimatedStart;
+    m.roundDurationMinutes = mDuration;
+    m.durationMinutes = mDuration;
     m.boardName = 'Main Carrom Board';
     m.carromBoardNumber = 1;
     await m.save();
@@ -249,6 +253,9 @@ const enqueueNewlyReadyMatch = async (tournamentId, matchDoc) => {
   if (!matchDoc || matchDoc.isBye || matchDoc.status === 'completed') return matchDoc;
   if (!matchDoc.team1 || !matchDoc.team2) return matchDoc; // Still WAITING
 
+  const tournament = await Tournament.findById(tournamentId);
+  const durationMin = tournament?.scheduleSettings?.roundDurationMinutes || tournament?.scheduleSettings?.matchDurationMinutes || 20;
+
   // Find max queuePosition among currently ready matches
   const maxPositionMatch = await Match.findOne({
     tournamentId,
@@ -262,6 +269,10 @@ const enqueueNewlyReadyMatch = async (tournamentId, matchDoc) => {
   matchDoc.status = 'scheduled';
   matchDoc.boardName = 'Main Carrom Board';
   matchDoc.carromBoardNumber = 1;
+  if (!matchDoc.roundDurationMinutes) {
+    matchDoc.roundDurationMinutes = durationMin;
+    matchDoc.durationMinutes = durationMin;
+  }
   await matchDoc.save();
 
   await recalculateEstimatedTimes(tournamentId);
@@ -275,10 +286,13 @@ const generateSequentialSchedule = async (tournamentId, settings = {}, adminUser
   const tournament = await Tournament.findById(tournamentId);
   if (!tournament) throw new Error('Tournament not found.');
 
+  const roundDuration = Number(settings.roundDurationMinutes || settings.matchDurationMinutes || tournament.scheduleSettings.roundDurationMinutes || tournament.scheduleSettings.matchDurationMinutes || 20);
+
   if (settings.startTime) tournament.scheduleSettings.startTime = new Date(settings.startTime);
-  if (settings.matchDurationMinutes) tournament.scheduleSettings.matchDurationMinutes = Number(settings.matchDurationMinutes);
-  if (settings.breakTimeMinutes) tournament.scheduleSettings.breakTimeMinutes = Number(settings.breakTimeMinutes);
-  if (settings.minRestTimeMinutes) tournament.scheduleSettings.minRestTimeMinutes = Number(settings.minRestTimeMinutes);
+  tournament.scheduleSettings.roundDurationMinutes = roundDuration;
+  tournament.scheduleSettings.matchDurationMinutes = roundDuration;
+  if (settings.breakTimeMinutes !== undefined) tournament.scheduleSettings.breakTimeMinutes = Number(settings.breakTimeMinutes);
+  if (settings.minRestTimeMinutes !== undefined) tournament.scheduleSettings.minRestTimeMinutes = Number(settings.minRestTimeMinutes);
 
   tournament.markModified('scheduleSettings');
   await tournament.save();
@@ -299,6 +313,8 @@ const generateSequentialSchedule = async (tournamentId, settings = {}, adminUser
     m.status = m.status === 'live' ? 'live' : 'scheduled';
     m.boardName = 'Main Carrom Board';
     m.carromBoardNumber = 1;
+    m.roundDurationMinutes = roundDuration;
+    m.durationMinutes = roundDuration;
     await m.save();
   }
 

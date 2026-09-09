@@ -178,6 +178,7 @@ const getMatchById = async (req, res, next) => {
 const startMatch = async (req, res, next) => {
   try {
     const { id } = req.params;
+    const { durationMinutes, roundDurationMinutes } = req.body || {};
     const readiness = await canStartMatch(id);
 
     if (!readiness.canStart) {
@@ -189,10 +190,27 @@ const startMatch = async (req, res, next) => {
     }
 
     const match = readiness.match;
+    const tournament = await Tournament.findById(match.tournamentId);
+    const configuredDuration = Number(
+      roundDurationMinutes ||
+      durationMinutes ||
+      match.roundDurationMinutes ||
+      match.durationMinutes ||
+      tournament?.scheduleSettings?.roundDurationMinutes ||
+      tournament?.scheduleSettings?.matchDurationMinutes ||
+      20
+    );
+
     match.status = 'live';
     match.actualStartTime = new Date();
     match.boardName = 'Main Carrom Board';
     match.carromBoardNumber = 1;
+    match.roundDurationMinutes = configuredDuration;
+    match.durationMinutes = configuredDuration;
+    match.isTimerPaused = false;
+    match.timerPausedAt = null;
+    match.timeElapsedBeforePause = 0;
+    match.extraTimeMinutes = 0;
     await match.save();
 
     // Recalculate estimated times for remaining queue
@@ -210,14 +228,83 @@ const startMatch = async (req, res, next) => {
         roundName: match.roundName,
         team1: match.team1?.name,
         team2: match.team2?.name,
-        actualStartTime: match.actualStartTime
+        actualStartTime: match.actualStartTime,
+        roundDurationMinutes: configuredDuration
       },
-      reason: `Started Match #${match.matchNumber} as LIVE on Main Carrom Board.`
+      reason: `Started Match #${match.matchNumber} as LIVE on Main Carrom Board with ${configuredDuration} min round time.`
     });
 
     res.json({
       success: true,
-      message: `Match #${match.matchNumber} is now LIVE on Main Carrom Board.`,
+      message: `Match #${match.matchNumber} is now LIVE on Main Carrom Board (${configuredDuration} min round).`,
+      match
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// Admin: Update Match Timer (Pause, Resume, Add Extra Time, Change Duration, Reset)
+const updateMatchTimer = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { action, extraMinutes, durationMinutes, roundDurationMinutes } = req.body || {};
+
+    const match = await Match.findById(id).populate('team1 team2');
+    if (!match) {
+      return res.status(404).json({ success: false, message: 'Match not found.' });
+    }
+
+    const now = new Date();
+
+    switch (action) {
+      case 'pause': {
+        if (!match.isTimerPaused && match.actualStartTime) {
+          const currentSessionElapsed = Math.floor((now.getTime() - new Date(match.actualStartTime).getTime()) / 1000);
+          match.timeElapsedBeforePause = (match.timeElapsedBeforePause || 0) + Math.max(0, currentSessionElapsed);
+          match.isTimerPaused = true;
+          match.timerPausedAt = now;
+        }
+        break;
+      }
+      case 'resume': {
+        if (match.isTimerPaused) {
+          match.isTimerPaused = false;
+          match.timerPausedAt = null;
+          match.actualStartTime = now;
+        }
+        break;
+      }
+      case 'add_time': {
+        const added = Number(extraMinutes) || 2;
+        match.extraTimeMinutes = (match.extraTimeMinutes || 0) + added;
+        break;
+      }
+      case 'set_duration': {
+        const newDur = Number(roundDurationMinutes || durationMinutes);
+        if (newDur && newDur > 0) {
+          match.roundDurationMinutes = newDur;
+          match.durationMinutes = newDur;
+        }
+        break;
+      }
+      case 'reset': {
+        match.actualStartTime = now;
+        match.isTimerPaused = false;
+        match.timerPausedAt = null;
+        match.timeElapsedBeforePause = 0;
+        match.extraTimeMinutes = 0;
+        break;
+      }
+      default:
+        return res.status(400).json({ success: false, message: 'Invalid timer action. Supported: pause, resume, add_time, set_duration, reset.' });
+    }
+
+    await match.save();
+
+    res.json({
+      success: true,
+      message: `Match timer updated (${action}).`,
       match
     });
   } catch (error) {
@@ -270,11 +357,11 @@ const correctMatch = async (req, res, next) => {
   }
 };
 
-// Admin: Adjust match estimated schedule time
+// Admin: Adjust match estimated schedule time & round duration
 const scheduleMatch = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { scheduledTime } = req.body;
+    const { scheduledTime, roundDurationMinutes, durationMinutes } = req.body;
 
     const match = await Match.findById(id);
     if (!match) {
@@ -282,6 +369,13 @@ const scheduleMatch = async (req, res, next) => {
     }
 
     if (scheduledTime !== undefined) match.scheduledTime = scheduledTime ? new Date(scheduledTime) : null;
+    if (roundDurationMinutes !== undefined || durationMinutes !== undefined) {
+      const dur = Number(roundDurationMinutes || durationMinutes);
+      if (dur > 0) {
+        match.roundDurationMinutes = dur;
+        match.durationMinutes = dur;
+      }
+    }
     match.boardName = 'Main Carrom Board';
     match.carromBoardNumber = 1;
 
@@ -315,6 +409,10 @@ const stopLiveMatch = async (req, res, next) => {
 
     match.status = 'scheduled';
     match.actualStartTime = null;
+    match.isTimerPaused = false;
+    match.timerPausedAt = null;
+    match.timeElapsedBeforePause = 0;
+    match.extraTimeMinutes = 0;
     match.boards = [
       { boardNumber: 1, team1Score: 0, team2Score: 0, queenPocketedBy: 'none', queenCovered: false, team1Fouls: 0, team2Fouls: 0, boardWinner: null },
       { boardNumber: 2, team1Score: 0, team2Score: 0, queenPocketedBy: 'none', queenCovered: false, team1Fouls: 0, team2Fouls: 0, boardWinner: null },
@@ -360,6 +458,7 @@ module.exports = {
   getMatchById,
   startMatch,
   stopLiveMatch,
+  updateMatchTimer,
   updateScore,
   confirmMatch,
   correctMatch,

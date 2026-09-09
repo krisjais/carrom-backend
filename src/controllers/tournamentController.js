@@ -126,7 +126,14 @@ const updateTournamentSettings = async (req, res, next) => {
 
     if (scheduleSettings) {
       if (scheduleSettings.startTime) tournament.scheduleSettings.startTime = new Date(scheduleSettings.startTime);
-      if (scheduleSettings.matchDurationMinutes !== undefined) tournament.scheduleSettings.matchDurationMinutes = Number(scheduleSettings.matchDurationMinutes);
+      if (scheduleSettings.matchDurationMinutes !== undefined) {
+        tournament.scheduleSettings.matchDurationMinutes = Number(scheduleSettings.matchDurationMinutes);
+        tournament.scheduleSettings.roundDurationMinutes = Number(scheduleSettings.matchDurationMinutes);
+      }
+      if (scheduleSettings.roundDurationMinutes !== undefined) {
+        tournament.scheduleSettings.roundDurationMinutes = Number(scheduleSettings.roundDurationMinutes);
+        tournament.scheduleSettings.matchDurationMinutes = Number(scheduleSettings.roundDurationMinutes);
+      }
       if (scheduleSettings.breakTimeMinutes !== undefined) tournament.scheduleSettings.breakTimeMinutes = Number(scheduleSettings.breakTimeMinutes);
       if (scheduleSettings.minRestTimeMinutes !== undefined) tournament.scheduleSettings.minRestTimeMinutes = Number(scheduleSettings.minRestTimeMinutes);
       tournament.markModified('scheduleSettings');

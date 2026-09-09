@@ -138,6 +138,34 @@ const matchSchema = new mongoose.Schema(
       type: Date,
       default: null
     },
+    roundDurationMinutes: {
+      type: Number,
+      default: 20
+    },
+    durationMinutes: {
+      type: Number,
+      default: 20
+    },
+    isTimerPaused: {
+      type: Boolean,
+      default: false
+    },
+    timerPausedAt: {
+      type: Date,
+      default: null
+    },
+    timeElapsedBeforePause: {
+      type: Number,
+      default: 0
+    },
+    extraTimeMinutes: {
+      type: Number,
+      default: 0
+    },
+    elapsedTimeSeconds: {
+      type: Number,
+      default: 0
+    },
     boards: {
       type: [boardDetailSchema],
       default: () => [
