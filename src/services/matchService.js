@@ -8,20 +8,74 @@ const isDbConnected = () => mongoose.connection.readyState === 1;
 
 const startMatch = async (matchId) => {
   if (isDbConnected()) {
-    const match = await ChessMatch.findById(matchId);
+    let match = await ChessMatch.findById(matchId);
+    if (!match) {
+      match = await ChessMatch.findOne({ matchId });
+    }
     if (!match) throw new Error('Match not found.');
     if (match.status === 'completed') throw new Error('Cannot start a match that is already completed.');
 
     match.status = 'live';
     match.actualStartTime = new Date();
+    match.durationMinutes = 10;
     await match.save();
-    return match;
+
+    return await ChessMatch.findById(match._id)
+      .populate('player1', 'fullName playerId department rank')
+      .populate('player2', 'fullName playerId department rank');
   }
 
   const match = memoryStore.matches.find(m => m._id === matchId || m.matchId === matchId);
   if (!match) throw new Error('Match not found.');
   match.status = 'live';
   match.actualStartTime = new Date();
+  match.durationMinutes = 10;
+  return match;
+};
+
+const createManualMatch = async (matchData) => {
+  const { player1Id, player2Id, round, scheduledTime, durationMinutes } = matchData;
+  const targetRound = Number(round) || 1;
+  const duration = Number(durationMinutes) || 10;
+
+  let mCounter = (isDbConnected() ? await ChessMatch.countDocuments() : memoryStore.matches.length) + 1;
+  const matchId = `CHS-M${String(mCounter).padStart(3, '0')}`;
+
+  if (isDbConnected()) {
+    const match = await ChessMatch.create({
+      matchId,
+      round: targetRound,
+      player1: player1Id || null,
+      player2: player2Id || null,
+      status: 'scheduled',
+      scheduledTime: scheduledTime ? new Date(scheduledTime) : new Date(),
+      durationMinutes: duration
+    });
+    return await ChessMatch.findById(match._id)
+      .populate('player1', 'fullName playerId department rank')
+      .populate('player2', 'fullName playerId department rank');
+  }
+
+  const p1 = memoryStore.players.find(p => (p._id || p.playerId) === player1Id);
+  const p2 = memoryStore.players.find(p => (p._id || p.playerId) === player2Id);
+
+  const match = {
+    _id: `mem_m_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
+    matchId,
+    round: targetRound,
+    player1: p1 || null,
+    player2: p2 || null,
+    status: 'scheduled',
+    scheduledTime: scheduledTime ? new Date(scheduledTime) : new Date(),
+    durationMinutes: duration,
+    player1Captured: { pawns: 0, knights: 0, bishops: 0, rooks: 0, queens: 0 },
+    player2Captured: { pawns: 0, knights: 0, bishops: 0, rooks: 0, queens: 0 },
+    player1MaterialScore: 0,
+    player2MaterialScore: 0,
+    winner: 'none'
+  };
+
+  memoryStore.matches.push(match);
   return match;
 };
 
@@ -141,6 +195,7 @@ const cancelMatch = async (matchId) => {
 
 module.exports = {
   startMatch,
+  createManualMatch,
   submitResult,
   overrideResult,
   cancelMatch

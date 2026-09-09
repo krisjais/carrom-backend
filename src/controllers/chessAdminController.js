@@ -6,7 +6,7 @@ const ChessConfiguration = require('../models/ChessConfiguration');
 const memoryStore = require('../utils/chessMemoryDb');
 const { getConfiguration } = require('../services/scoringService');
 const { generateRoundPairings } = require('../services/pairingService');
-const { submitResult, overrideResult, startMatch, cancelMatch } = require('../services/matchService');
+const { submitResult, overrideResult, startMatch, cancelMatch, createManualMatch } = require('../services/matchService');
 const { recalculateAllStandings } = require('../services/standingsService');
 
 const isDbConnected = () => mongoose.connection.readyState === 1;
@@ -516,13 +516,43 @@ exports.getAdminMatches = async (req, res, next) => {
   }
 };
 
+// Admin Explicit Start Match (POST /admin/matches/:id/start)
+exports.startMatch = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const match = await startMatch(id);
+    return res.json({
+      success: true,
+      message: 'Match started successfully.',
+      data: match
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// Admin Create Manual Match Pairing (POST /admin/matches)
+exports.createMatch = async (req, res, next) => {
+  try {
+    const match = await createManualMatch(req.body);
+    return res.status(201).json({
+      success: true,
+      message: 'Manual match pairing created successfully.',
+      data: match
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
 // Admin Update Match Status / Start Match (PATCH/PUT)
 exports.updateMatch = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { status, action } = req.body;
+    const { status, action } = req.body || {};
 
-    if (action === 'start' || status === 'live') {
+    const isStart = action === 'start' || status === 'live' || (req.path && req.path.endsWith('/start')) || (req.originalUrl && req.originalUrl.includes('/start'));
+    if (isStart) {
       const match = await startMatch(id);
       return res.json({
         success: true,
@@ -573,6 +603,28 @@ exports.submitMatchResult = async (req, res, next) => {
       message: 'Match result submitted and standings updated.',
       data: match
     });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// Admin Delete Match (DELETE /admin/matches/:id)
+exports.deleteMatch = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    if (isDbConnected()) {
+      const match = await ChessMatch.findByIdAndDelete(id);
+      if (!match) {
+        return res.status(404).json({ success: false, message: 'Match not found.' });
+      }
+      return res.json({ success: true, message: 'Match pairing deleted.' });
+    }
+    const idx = memoryStore.matches.findIndex(m => m._id === id || m.matchId === id);
+    if (idx === -1) {
+      return res.status(404).json({ success: false, message: 'Match not found.' });
+    }
+    memoryStore.matches.splice(idx, 1);
+    return res.json({ success: true, message: 'Match pairing deleted.' });
   } catch (err) {
     next(err);
   }

@@ -40,12 +40,16 @@ router.delete('/admin/players/:id', chessAdminAuth, adminCtrl.deletePlayer);
 // ADMIN MATCH MANAGEMENT
 // -------------------------------------------------------------
 router.get('/admin/matches', chessAdminAuth, adminCtrl.getAdminMatches);
+router.post('/admin/matches', chessAdminAuth, adminCtrl.createMatch);
 router.post('/admin/matches/generate', chessAdminAuth, adminCtrl.generateMatches);
-router.post('/admin/matches/:id/start', chessAdminAuth, adminCtrl.updateMatch);
+router.post('/admin/matches/:id/start', chessAdminAuth, adminCtrl.startMatch);
+router.put('/admin/matches/:id/start', chessAdminAuth, adminCtrl.startMatch);
+router.patch('/admin/matches/:id/start', chessAdminAuth, adminCtrl.startMatch);
 router.put('/admin/matches/:id/result', chessAdminAuth, adminCtrl.submitMatchResult);
 router.post('/admin/matches/:id/result', chessAdminAuth, adminCtrl.submitMatchResult);
 router.post('/admin/matches/:id/override', chessAdminAuth, adminCtrl.overrideMatchResult);
 router.post('/admin/matches/:id/cancel', chessAdminAuth, adminCtrl.updateMatch);
+router.delete('/admin/matches/:id', chessAdminAuth, adminCtrl.deleteMatch);
 router.patch('/admin/matches/:id', chessAdminAuth, adminCtrl.updateMatch);
 router.put('/admin/matches/:id', chessAdminAuth, adminCtrl.updateMatch);
 

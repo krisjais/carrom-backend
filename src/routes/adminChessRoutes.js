@@ -17,10 +17,18 @@ router.delete('/players/:id', chessAdminAuth, adminCtrl.deletePlayer);
 // Matches
 router.get('/matches', chessAdminAuth, adminCtrl.getAdminMatches);
 router.get('/chess/matches', chessAdminAuth, adminCtrl.getAdminMatches);
+router.post('/matches', chessAdminAuth, adminCtrl.createMatch);
+router.post('/chess/matches', chessAdminAuth, adminCtrl.createMatch);
 router.post('/matches/generate', chessAdminAuth, adminCtrl.generateMatches);
-router.patch('/matches/:id', chessAdminAuth, adminCtrl.updateMatch);
-router.put('/matches/:id', chessAdminAuth, adminCtrl.updateMatch);
+router.post('/chess/matches/generate', chessAdminAuth, adminCtrl.generateMatches);
+router.post('/matches/:id/start', chessAdminAuth, adminCtrl.startMatch);
+router.post('/chess/matches/:id/start', chessAdminAuth, adminCtrl.startMatch);
+router.put('/matches/:id/start', chessAdminAuth, adminCtrl.startMatch);
+router.put('/chess/matches/:id/start', chessAdminAuth, adminCtrl.startMatch);
+router.delete('/matches/:id', chessAdminAuth, adminCtrl.deleteMatch);
+router.delete('/chess/matches/:id', chessAdminAuth, adminCtrl.deleteMatch);
 router.post('/matches/:id/result', chessAdminAuth, adminCtrl.submitMatchResult);
+router.post('/chess/matches/:id/result', chessAdminAuth, adminCtrl.submitMatchResult);
 
 // Standings
 router.get('/standings', chessAdminAuth, adminCtrl.getAdminStandings);
