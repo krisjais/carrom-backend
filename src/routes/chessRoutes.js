@@ -51,6 +51,7 @@ router.post('/admin/matches/:id/result', chessAdminAuth, adminCtrl.submitMatchRe
 router.post('/admin/matches/:id/override', chessAdminAuth, adminCtrl.overrideMatchResult);
 router.post('/admin/matches/:id/cancel', chessAdminAuth, adminCtrl.updateMatch);
 router.delete('/admin/matches/:id', chessAdminAuth, adminCtrl.deleteMatch);
+router.post('/admin/matches/bulk-delete', chessAdminAuth, adminCtrl.bulkDeleteMatches);
 router.patch('/admin/matches/:id', chessAdminAuth, adminCtrl.updateMatch);
 router.put('/admin/matches/:id', chessAdminAuth, adminCtrl.updateMatch);
 

@@ -5,9 +5,10 @@ const ChessRound = require('../models/ChessRound');
 const memoryStore = require('../utils/chessMemoryDb');
 const { getConfiguration } = require('./scoringService');
 
-const generateRoundPairings = async (roundNumber = null) => {
+const generateRoundPairings = async (roundNumber = null, roundName = null) => {
   const config = await getConfiguration();
-  const targetRound = roundNumber || config.currentRound || 1;
+  const targetRound = Number(roundNumber) || config.currentRound || 1;
+  const customRoundName = roundName ? String(roundName).trim() : `Round ${targetRound}`;
   const isDbConnected = mongoose.connection.readyState === 1;
 
   // 1. Get all eligible players (Approved or Active status)
@@ -127,6 +128,7 @@ const generateRoundPairings = async (roundNumber = null) => {
     const byeMatchData = {
       matchId,
       round: targetRound,
+      roundName: customRoundName,
       isBye: true,
       status: 'completed',
       winner: 'player1',
@@ -135,7 +137,7 @@ const generateRoundPairings = async (roundNumber = null) => {
       durationMinutes: config.matchDuration || 10,
       actualStartTime: new Date(),
       actualEndTime: new Date(),
-      notes: `Automatic BYE awarded for Round ${targetRound} to leaderboard leader.`
+      notes: `Automatic BYE awarded for ${customRoundName} to leaderboard leader.`
     };
 
     let byeMatch;
@@ -197,6 +199,7 @@ const generateRoundPairings = async (roundNumber = null) => {
     const matchData = {
       matchId,
       round: targetRound,
+      roundName: customRoundName,
       isBye: false,
       status: 'scheduled',
       scheduledTime: new Date(),

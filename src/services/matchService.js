@@ -34,8 +34,20 @@ const startMatch = async (matchId) => {
 };
 
 const createManualMatch = async (matchData) => {
-  const { player1Id, player2Id, round, scheduledTime, durationMinutes } = matchData;
-  const targetRound = Number(round) || 1;
+  const { player1Id, player2Id, round, roundName, scheduledTime, durationMinutes } = matchData;
+  let targetRound = Number(round);
+  let customRoundName = roundName ? String(roundName).trim() : '';
+
+  if (isNaN(targetRound)) {
+    if (!customRoundName && round) {
+      customRoundName = String(round).trim();
+    }
+    targetRound = 1;
+  }
+  if (!customRoundName) {
+    customRoundName = `Round ${targetRound}`;
+  }
+
   const duration = Number(durationMinutes) || 10;
 
   let mCounter = (isDbConnected() ? await ChessMatch.countDocuments() : memoryStore.matches.length) + 1;
@@ -45,6 +57,7 @@ const createManualMatch = async (matchData) => {
     const match = await ChessMatch.create({
       matchId,
       round: targetRound,
+      roundName: customRoundName,
       player1: player1Id || null,
       player2: player2Id || null,
       status: 'scheduled',
@@ -63,6 +76,7 @@ const createManualMatch = async (matchData) => {
     _id: `mem_m_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
     matchId,
     round: targetRound,
+    roundName: customRoundName,
     player1: p1 || null,
     player2: p2 || null,
     status: 'scheduled',

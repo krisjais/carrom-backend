@@ -472,8 +472,8 @@ exports.importChessPlayers = async (req, res, next) => {
 // Admin Generate Matches
 exports.generateMatches = async (req, res, next) => {
   try {
-    const { round } = req.body;
-    const matches = await generateRoundPairings(round);
+    const { round, roundName } = req.body || {};
+    const matches = await generateRoundPairings(round, roundName);
 
     res.status(201).json({
       success: true,
@@ -640,6 +640,37 @@ exports.deleteMatch = async (req, res, next) => {
     }
     memoryStore.matches.splice(idx, 1);
     return res.json({ success: true, message: 'Match pairing deleted.' });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// Admin Bulk Delete Matches (POST /admin/matches/bulk-delete)
+exports.bulkDeleteMatches = async (req, res, next) => {
+  try {
+    const { ids } = req.body || {};
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ success: false, message: 'No match IDs provided for bulk deletion.' });
+    }
+
+    if (isDbConnected()) {
+      const result = await ChessMatch.deleteMany({ _id: { $in: ids } });
+      return res.json({
+        success: true,
+        message: `Successfully deleted ${result.deletedCount} match(es).`,
+        count: result.deletedCount
+      });
+    }
+
+    const initialLen = memoryStore.matches.length;
+    memoryStore.matches = memoryStore.matches.filter(m => !ids.includes(m._id) && !ids.includes(m.matchId));
+    const deletedCount = initialLen - memoryStore.matches.length;
+
+    return res.json({
+      success: true,
+      message: `Successfully deleted ${deletedCount} match(es).`,
+      count: deletedCount
+    });
   } catch (err) {
     next(err);
   }

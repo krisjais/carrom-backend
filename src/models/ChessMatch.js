@@ -24,6 +24,11 @@ const chessMatchSchema = new mongoose.Schema(
       required: true,
       min: 1
     },
+    roundName: {
+      type: String,
+      default: '',
+      trim: true
+    },
     player1: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'ChessPlayer',
