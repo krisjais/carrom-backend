@@ -193,9 +193,57 @@ const cancelMatch = async (matchId) => {
   return match;
 };
 
+const updateLiveCaptures = async (matchId, captureData) => {
+  const config = await getConfiguration();
+  const { player1Captured, player2Captured } = captureData;
+
+  if (isDbConnected()) {
+    let match = await ChessMatch.findById(matchId);
+    if (!match) match = await ChessMatch.findOne({ matchId });
+    if (!match) throw new Error('Match not found.');
+
+    if (player1Captured) match.player1Captured = player1Captured;
+    if (player2Captured) match.player2Captured = player2Captured;
+
+    match.player1MaterialScore = calculateMaterialScore(match.player1Captured, config);
+    match.player2MaterialScore = calculateMaterialScore(match.player2Captured, config);
+
+    // If match was scheduled, transition to live with 10-min clock
+    if (match.status === 'scheduled') {
+      match.status = 'live';
+      if (!match.actualStartTime) match.actualStartTime = new Date();
+      match.durationMinutes = 10;
+    }
+
+    await match.save();
+
+    return await ChessMatch.findById(match._id)
+      .populate('player1', 'fullName playerId department rank')
+      .populate('player2', 'fullName playerId department rank');
+  }
+
+  const match = memoryStore.matches.find(m => m._id === matchId || m.matchId === matchId);
+  if (!match) throw new Error('Match not found.');
+
+  if (player1Captured) match.player1Captured = player1Captured;
+  if (player2Captured) match.player2Captured = player2Captured;
+
+  match.player1MaterialScore = calculateMaterialScore(match.player1Captured, config);
+  match.player2MaterialScore = calculateMaterialScore(match.player2Captured, config);
+
+  if (match.status === 'scheduled') {
+    match.status = 'live';
+    if (!match.actualStartTime) match.actualStartTime = new Date();
+    match.durationMinutes = 10;
+  }
+
+  return match;
+};
+
 module.exports = {
   startMatch,
   createManualMatch,
+  updateLiveCaptures,
   submitResult,
   overrideResult,
   cancelMatch

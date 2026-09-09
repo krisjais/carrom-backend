@@ -6,7 +6,7 @@ const ChessConfiguration = require('../models/ChessConfiguration');
 const memoryStore = require('../utils/chessMemoryDb');
 const { getConfiguration } = require('../services/scoringService');
 const { generateRoundPairings } = require('../services/pairingService');
-const { submitResult, overrideResult, startMatch, cancelMatch, createManualMatch } = require('../services/matchService');
+const { submitResult, overrideResult, startMatch, cancelMatch, createManualMatch, updateLiveCaptures } = require('../services/matchService');
 const { recalculateAllStandings } = require('../services/standingsService');
 
 const isDbConnected = () => mongoose.connection.readyState === 1;
@@ -587,6 +587,21 @@ exports.updateMatch = async (req, res, next) => {
     if (status) match.status = status;
 
     res.json({ success: true, message: 'Match updated.', data: match });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// Admin Live In-Game Piece Captures Update (PUT /admin/matches/:id/live-score)
+exports.updateLiveCaptures = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const match = await updateLiveCaptures(id, req.body);
+    return res.json({
+      success: true,
+      message: 'Live material score updated.',
+      data: match
+    });
   } catch (err) {
     next(err);
   }

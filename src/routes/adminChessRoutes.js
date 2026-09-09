@@ -27,6 +27,10 @@ router.put('/matches/:id/start', chessAdminAuth, adminCtrl.startMatch);
 router.put('/chess/matches/:id/start', chessAdminAuth, adminCtrl.startMatch);
 router.delete('/matches/:id', chessAdminAuth, adminCtrl.deleteMatch);
 router.delete('/chess/matches/:id', chessAdminAuth, adminCtrl.deleteMatch);
+router.put('/matches/:id/live-score', chessAdminAuth, adminCtrl.updateLiveCaptures);
+router.put('/chess/matches/:id/live-score', chessAdminAuth, adminCtrl.updateLiveCaptures);
+router.patch('/matches/:id/live-score', chessAdminAuth, adminCtrl.updateLiveCaptures);
+router.patch('/chess/matches/:id/live-score', chessAdminAuth, adminCtrl.updateLiveCaptures);
 router.post('/matches/:id/result', chessAdminAuth, adminCtrl.submitMatchResult);
 router.post('/chess/matches/:id/result', chessAdminAuth, adminCtrl.submitMatchResult);
 

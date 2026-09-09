@@ -15,7 +15,9 @@ const generateRoundPairings = async (roundNumber = null) => {
     ? await ChessPlayer.find({
         status: { $in: ['Approved', 'Active', 'approved', 'active'] }
       }).sort({ tournamentPoints: -1, materialPoints: -1, wins: -1, fullName: 1 })
-    : memoryStore.players.filter(p => ['Approved', 'Active', 'approved', 'active'].includes(p.status));
+    : memoryStore.players
+        .filter(p => ['Approved', 'Active', 'approved', 'active'].includes(p.status))
+        .sort((a, b) => (b.tournamentPoints || 0) - (a.tournamentPoints || 0) || (b.materialPoints || 0) - (a.materialPoints || 0));
 
   if (eligiblePlayers.length < 2) {
     throw new Error('At least 2 approved players are required to generate pairings.');
@@ -30,7 +32,7 @@ const generateRoundPairings = async (roundNumber = null) => {
     throw new Error(`Matches for Round ${targetRound} have already been generated.`);
   }
 
-  // Retrieve all previous matches to avoid duplicate head-to-head pairings
+  // Retrieve all previous matches
   const pastMatches = isDbConnected ? await ChessMatch.find({}) : memoryStore.matches;
   const playedPairs = new Set();
   pastMatches.forEach(m => {
@@ -43,13 +45,68 @@ const generateRoundPairings = async (roundNumber = null) => {
   });
 
   let playerPool = [...eligiblePlayers];
+
+  // 2. Knockout rule: After Round 1, players who lost will NOT go to next round
+  if (targetRound > 1) {
+    const prevRoundMatches = pastMatches.filter(m => m.round === targetRound - 1);
+    if (prevRoundMatches.length === 0) {
+      throw new Error(`Cannot generate Round ${targetRound} pairings before Round ${targetRound - 1} matches are scheduled.`);
+    }
+
+    const uncompleted = prevRoundMatches.filter(m => m.status !== 'completed');
+    if (uncompleted.length > 0) {
+      throw new Error(`Round ${targetRound - 1} has ${uncompleted.length} uncompleted match(es). Please complete all matches in the previous round before generating Round ${targetRound}.`);
+    }
+
+    const advancingPlayerIds = new Set();
+    prevRoundMatches.forEach(m => {
+      const p1Id = (m.player1?._id || m.player1 || m.byePlayer?._id || m.byePlayer)?.toString();
+      const p2Id = (m.player2?._id || m.player2)?.toString();
+
+      if (m.isBye) {
+        if (p1Id) advancingPlayerIds.add(p1Id);
+      } else if (m.winner === 'player1') {
+        if (p1Id) advancingPlayerIds.add(p1Id);
+      } else if (m.winner === 'player2') {
+        if (p2Id) advancingPlayerIds.add(p2Id);
+      } else if (m.winner === 'draw') {
+        // In case of a draw, advance player with higher material score
+        if ((m.player1MaterialScore || 0) >= (m.player2MaterialScore || 0)) {
+          if (p1Id) advancingPlayerIds.add(p1Id);
+        } else {
+          if (p2Id) advancingPlayerIds.add(p2Id);
+        }
+      } else if (m.winnerPlayer) {
+        advancingPlayerIds.add(m.winnerPlayer.toString());
+      }
+    });
+
+    // Keep ONLY winning/advancing players in the pool
+    playerPool = playerPool.filter(p => {
+      const idStr = (p._id || p.playerId).toString();
+      return advancingPlayerIds.has(idStr);
+    });
+
+    if (playerPool.length < 2) {
+      throw new Error(`Only ${playerPool.length} advancing player remaining. The tournament has concluded with a champion!`);
+    }
+  }
+
+  // Sort remaining pool by points table: tournamentPoints desc, materialPoints desc, wins desc
+  playerPool.sort((a, b) => {
+    return (b.tournamentPoints || 0) - (a.tournamentPoints || 0) ||
+           (b.materialPoints || 0) - (a.materialPoints || 0) ||
+           (b.wins || 0) - (a.wins || 0);
+  });
+
   const createdMatches = [];
   let mCounter = (isDbConnected ? await ChessMatch.countDocuments() : memoryStore.matches.length) + 1;
 
-  // 2. Handle Odd Number of Players (Assign BYE)
+  // 3. Odd Number of Players: Player with HIGHEST points goes to the next round by default (BYE)
   if (playerPool.length % 2 !== 0) {
+    // Find the highest-point player from the top who hasn't had a bye yet
     let byeIndex = -1;
-    for (let i = playerPool.length - 1; i >= 0; i--) {
+    for (let i = 0; i < playerPool.length; i++) {
       const p = playerPool[i];
       const pIdStr = (p._id || p.playerId).toString();
       const hasBye = pastMatches.some(m => m.isBye && (m.byePlayer?._id || m.byePlayer)?.toString() === pIdStr);
@@ -59,8 +116,9 @@ const generateRoundPairings = async (roundNumber = null) => {
       }
     }
 
+    // If all remaining players already had a bye, pick the top player on points table
     if (byeIndex === -1) {
-      byeIndex = playerPool.length - 1;
+      byeIndex = 0;
     }
 
     const byePlayer = playerPool.splice(byeIndex, 1)[0];
@@ -77,7 +135,7 @@ const generateRoundPairings = async (roundNumber = null) => {
       durationMinutes: config.matchDuration || 10,
       actualStartTime: new Date(),
       actualEndTime: new Date(),
-      notes: `Automatic BYE awarded for Round ${targetRound}.`
+      notes: `Automatic BYE awarded for Round ${targetRound} to leaderboard leader.`
     };
 
     let byeMatch;
@@ -100,7 +158,7 @@ const generateRoundPairings = async (roundNumber = null) => {
       memoryStore.matches.push(byeMatch);
     }
 
-    // Update BYE player stats
+    // Update BYE player stats (+3 pts)
     byePlayer.byes = (byePlayer.byes || 0) + 1;
     byePlayer.tournamentPoints = (byePlayer.tournamentPoints || 0) + (config.tournamentPoints?.win ?? 3);
     byePlayer.matchesPlayed = (byePlayer.matchesPlayed || 0) + 1;
@@ -112,7 +170,7 @@ const generateRoundPairings = async (roundNumber = null) => {
     createdMatches.push(byeMatch);
   }
 
-  // 3. Pair remaining players
+  // 4. Pair remaining players
   const unassigned = [...playerPool];
   while (unassigned.length >= 2) {
     const p1 = unassigned.shift();
