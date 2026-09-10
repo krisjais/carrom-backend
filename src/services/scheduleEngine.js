@@ -20,9 +20,9 @@ const getMatchParticipantIds = (match) => {
 };
 
 /**
- * Checks if all participants in a match are rested and available
+ * Checks if all participants in a match are available (not currently active in another live match)
  */
-const checkMatchRestAvailability = async (tournamentId, matchDoc, minRestTimeMinutes = 10, referenceTime = new Date()) => {
+const checkMatchRestAvailability = async (tournamentId, matchDoc) => {
   // Ensure teams & players are populated
   let populatedMatch = matchDoc;
   if (!populatedMatch.team1?.player1 || (populatedMatch.team1?.isDoubles && !populatedMatch.team1?.player2)) {
@@ -36,7 +36,6 @@ const checkMatchRestAvailability = async (tournamentId, matchDoc, minRestTimeMin
   }
 
   const participantIds = getMatchParticipantIds(populatedMatch);
-  const now = referenceTime ? new Date(referenceTime).getTime() : Date.now();
 
   for (const pId of participantIds) {
     // Find all teams this participant is part of in this tournament
@@ -46,7 +45,7 @@ const checkMatchRestAvailability = async (tournamentId, matchDoc, minRestTimeMin
     }).select('_id');
     const teamIds = participantTeams.map((t) => t._id);
 
-    // 1. Check if participant is currently in a LIVE match
+    // Check if participant is currently in an ongoing LIVE match
     const liveMatch = await Match.findOne({
       tournamentId,
       _id: { $ne: matchDoc._id },
@@ -63,37 +62,6 @@ const checkMatchRestAvailability = async (tournamentId, matchDoc, minRestTimeMin
         isCurrentlyLive: true,
         reason: `${pName} is currently playing in Match #${liveMatch.matchNumber} on Main Carrom Board.`
       };
-    }
-
-    // 2. Check most recently completed match by this participant
-    const lastCompleted = await Match.findOne({
-      tournamentId,
-      _id: { $ne: matchDoc._id },
-      status: 'completed',
-      $or: [{ team1: { $in: teamIds } }, { team2: { $in: teamIds } }]
-    }).sort({ actualEndTime: -1, updatedAt: -1 });
-
-    if (lastCompleted) {
-      const finishTime = lastCompleted.actualEndTime
-        ? new Date(lastCompleted.actualEndTime).getTime()
-        : new Date(lastCompleted.updatedAt).getTime();
-
-      const restRequiredUntil = finishTime + minRestTimeMinutes * 60 * 1000;
-
-      if (now < restRequiredUntil) {
-        const participant = await Participant.findById(pId);
-        const pName = participant ? participant.fullName : 'Participant';
-        const remainingSeconds = Math.ceil((restRequiredUntil - now) / 1000);
-        const availableAt = new Date(restRequiredUntil);
-
-        return {
-          isRested: false,
-          restingPlayerName: pName,
-          availableAt,
-          remainingSeconds,
-          reason: `${pName} finished their last match at ${new Date(finishTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}. Minimum rest time is ${minRestTimeMinutes} min (ready in ${Math.ceil(remainingSeconds / 60)} min at ${availableAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}).`
-        };
-      }
     }
   }
 
@@ -142,19 +110,13 @@ const canStartMatch = async (matchId) => {
     };
   }
 
-  // 2. Get tournament settings for rest time
-  const tournament = await Tournament.findById(match.tournamentId);
-  const minRestTime = tournament?.scheduleSettings?.minRestTimeMinutes || 10;
-
-  // 3. Check participant rest availability
-  const restCheck = await checkMatchRestAvailability(match.tournamentId, match, minRestTime, new Date());
+  // 2. Check participant live availability
+  const restCheck = await checkMatchRestAvailability(match.tournamentId, match);
   if (!restCheck.isRested) {
     return {
       canStart: false,
       reason: restCheck.reason,
-      restingPlayerName: restCheck.restingPlayerName,
-      availableAt: restCheck.availableAt,
-      remainingSeconds: restCheck.remainingSeconds
+      restingPlayerName: restCheck.restingPlayerName
     };
   }
 
@@ -171,7 +133,6 @@ const recalculateEstimatedTimes = async (tournamentId) => {
 
   const durationMin = tournament.scheduleSettings?.roundDurationMinutes || tournament.scheduleSettings?.matchDurationMinutes || 20;
   const breakMin = tournament.scheduleSettings?.breakTimeMinutes || 5;
-  const minRestMin = tournament.scheduleSettings?.minRestTimeMinutes || 10;
   const configuredStart = tournament.scheduleSettings?.startTime ? new Date(tournament.scheduleSettings.startTime) : new Date();
 
   // Find all READY matches ordered strictly by queuePosition
@@ -205,7 +166,7 @@ const recalculateEstimatedTimes = async (tournamentId) => {
     currentBoardTime = new Date(Math.max(Date.now(), configuredStart.getTime()));
   }
 
-  // Player finish time tracker for estimated cross-category rest calculation
+  // Player finish time tracker for estimated cross-category scheduling
   const playerEstimatedFreeAt = {};
 
   for (const m of readyMatches) {
@@ -217,9 +178,8 @@ const recalculateEstimatedTimes = async (tournamentId) => {
 
     for (const pId of pIds) {
       if (playerEstimatedFreeAt[pId]) {
-        const requiredRestUntil = playerEstimatedFreeAt[pId] + minRestMin * 60 * 1000;
-        if (requiredRestUntil > matchEarliestStart) {
-          matchEarliestStart = requiredRestUntil;
+        if (playerEstimatedFreeAt[pId] > matchEarliestStart) {
+          matchEarliestStart = playerEstimatedFreeAt[pId];
         }
       }
     }

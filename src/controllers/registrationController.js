@@ -31,17 +31,24 @@ const submitRegistration = async (req, res, next) => {
       });
     }
 
-    if (!doublesPartnerName || !mixedDoublesPartnerName) {
+    if (gender === 'male' && !doublesPartnerName) {
       return res.status(400).json({
         success: false,
-        message: 'Both Doubles Partner Name and Mixed Doubles Partner Name are required.'
+        message: 'Boys Doubles Partner Name is required.'
+      });
+    }
+
+    if (!mixedDoublesPartnerName) {
+      return res.status(400).json({
+        success: false,
+        message: 'Mixed Doubles Partner Name is required.'
       });
     }
 
     const cleanFullName = fullName.trim();
     const cleanDepartment = department.trim();
-    const cleanDoublesPartner = doublesPartnerName.trim();
-    const cleanMixedPartner = mixedDoublesPartnerName.trim();
+    const cleanDoublesPartner = (doublesPartnerName || '').trim();
+    const cleanMixedPartner = (mixedDoublesPartnerName || '').trim();
 
     let tournId = tournamentId;
     if (!tournId) {
@@ -194,15 +201,19 @@ const lookupRegistrationByStudentId = async (req, res, next) => {
       )
     ]);
 
+    const enrolledEvents = participant.gender === 'male'
+      ? ['Boys Singles', 'Boys Doubles', 'Mixed Doubles']
+      : registration.doublesPartnerName?.trim()
+      ? ['Girls Singles', 'Girls Doubles', 'Mixed Doubles']
+      : ['Girls Singles', 'Mixed Doubles'];
+
     res.json({
       success: true,
       participant,
       registration,
       doublesValidation,
       mixedDoublesValidation,
-      events: participant.gender === 'male'
-        ? ['Boys Singles', 'Boys Doubles', 'Mixed Doubles']
-        : ['Girls Singles', 'Girls Doubles', 'Mixed Doubles']
+      events: enrolledEvents
     });
   } catch (error) {
     next(error);
