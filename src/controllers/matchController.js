@@ -49,6 +49,29 @@ const getMatches = async (req, res, next) => {
   }
 };
 
+// Helper to clamp live match timer if round time completed
+const checkAndClampMatchTimer = async (match) => {
+  if (!match || match.status !== 'live' || !match.actualStartTime) {
+    return match;
+  }
+  const allowedSecs = (Number(match.roundDurationMinutes || match.durationMinutes || 20) + Number(match.extraTimeMinutes || 0)) * 60;
+  let currentElapsed = Number(match.timeElapsedBeforePause || 0);
+  if (!match.isTimerPaused) {
+    const sessionElapsed = Math.max(0, Math.floor((Date.now() - new Date(match.actualStartTime).getTime()) / 1000));
+    currentElapsed += sessionElapsed;
+  }
+
+  if (currentElapsed >= allowedSecs) {
+    if (!match.isTimerPaused || match.timeElapsedBeforePause !== allowedSecs) {
+      match.isTimerPaused = true;
+      match.timeElapsedBeforePause = allowedSecs;
+      match.timerPausedAt = match.timerPausedAt || new Date();
+      await match.save();
+    }
+  }
+  return match;
+};
+
 // Get Live Match, Next Match, Ready Queue, and Arena State
 const getLiveMatches = async (req, res, next) => {
   try {
@@ -71,6 +94,10 @@ const getLiveMatches = async (req, res, next) => {
         path: 'team2',
         populate: [{ path: 'player1' }, { path: 'player2' }]
       });
+
+    if (currentMatch) {
+      await checkAndClampMatchTimer(currentMatch);
+    }
 
     // READY Queue: Playable matches with known teams waiting for Main Carrom Board
     const readyQueue = await Match.find({
@@ -161,6 +188,10 @@ const getMatchById = async (req, res, next) => {
 
     if (!match) {
       return res.status(404).json({ success: false, message: 'Match not found.' });
+    }
+
+    if (match.status === 'live') {
+      await checkAndClampMatchTimer(match);
     }
 
     let readiness = null;
@@ -257,11 +288,13 @@ const updateMatchTimer = async (req, res, next) => {
 
     const now = new Date();
 
+    const allowedSecs = (Number(match.roundDurationMinutes || match.durationMinutes || 20) + Number(match.extraTimeMinutes || 0)) * 60;
+
     switch (action) {
       case 'pause': {
         if (!match.isTimerPaused && match.actualStartTime) {
           const currentSessionElapsed = Math.floor((now.getTime() - new Date(match.actualStartTime).getTime()) / 1000);
-          match.timeElapsedBeforePause = (match.timeElapsedBeforePause || 0) + Math.max(0, currentSessionElapsed);
+          match.timeElapsedBeforePause = Math.min(allowedSecs, (match.timeElapsedBeforePause || 0) + Math.max(0, currentSessionElapsed));
           match.isTimerPaused = true;
           match.timerPausedAt = now;
         }
@@ -269,10 +302,20 @@ const updateMatchTimer = async (req, res, next) => {
       }
       case 'resume': {
         if (match.isTimerPaused) {
-          match.isTimerPaused = false;
-          match.timerPausedAt = null;
-          match.actualStartTime = now;
+          // Only allow resuming if there is remaining time
+          if ((match.timeElapsedBeforePause || 0) < allowedSecs) {
+            match.isTimerPaused = false;
+            match.timerPausedAt = null;
+            match.actualStartTime = now;
+          }
         }
+        break;
+      }
+      case 'expire':
+      case 'time_completed': {
+        match.timeElapsedBeforePause = allowedSecs;
+        match.isTimerPaused = true;
+        match.timerPausedAt = now;
         break;
       }
       case 'add_time': {
@@ -297,7 +340,7 @@ const updateMatchTimer = async (req, res, next) => {
         break;
       }
       default:
-        return res.status(400).json({ success: false, message: 'Invalid timer action. Supported: pause, resume, add_time, set_duration, reset.' });
+        return res.status(400).json({ success: false, message: 'Invalid timer action. Supported: pause, resume, add_time, set_duration, reset, expire.' });
     }
 
     await match.save();

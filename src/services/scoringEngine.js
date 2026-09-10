@@ -175,14 +175,19 @@ const confirmMatchWinner = async (matchId, adminUser, overrideWinnerTeamId = nul
   const now = new Date();
   match.actualEndTime = now;
 
+  const roundMins = Number(match.roundDurationMinutes || match.durationMinutes || 20);
+  const extraMins = Number(match.extraTimeMinutes || 0);
+  const allowedCapSeconds = (roundMins + extraMins) * 60;
+
   if (match.actualStartTime) {
-    const elapsedSeconds = Math.max(1, Math.floor((now.getTime() - new Date(match.actualStartTime).getTime()) / 1000));
-    match.elapsedTimeSeconds = elapsedSeconds;
+    let elapsed = match.timeElapsedBeforePause && match.timeElapsedBeforePause > 0
+      ? Math.round(match.timeElapsedBeforePause)
+      : Math.max(1, Math.floor((now.getTime() - new Date(match.actualStartTime).getTime()) / 1000));
+    match.elapsedTimeSeconds = Math.min(allowedCapSeconds, elapsed);
   } else {
-    // If started time wasn't explicitly logged, compute reasonable duration from updatedAt or round duration
-    const defaultMins = match.roundDurationMinutes || match.durationMinutes || 20;
-    match.actualStartTime = new Date(now.getTime() - defaultMins * 60 * 1000);
-    match.elapsedTimeSeconds = defaultMins * 60;
+    // If started time wasn't explicitly logged, compute reasonable duration from round duration
+    match.actualStartTime = new Date(now.getTime() - roundMins * 60 * 1000);
+    match.elapsedTimeSeconds = roundMins * 60;
   }
 
   match.queuePosition = null; // Removed from active READY queue

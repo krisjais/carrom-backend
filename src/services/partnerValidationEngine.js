@@ -10,6 +10,19 @@ const normalizeText = (text) => {
 };
 
 /**
+ * Sanitizes partner names to prevent boolean literals or empty strings from being treated as names
+ */
+const sanitizePartnerName = (val) => {
+  if (!val) return '';
+  const s = String(val).replace(/\s+/g, ' ').trim();
+  const lower = s.toLowerCase();
+  if (['yes', 'no', 'true', 'false', '0', '1', 'none', 'n/a', 'na', '-', 'nil', 'null', 'undefined'].includes(lower)) {
+    return '';
+  }
+  return s;
+};
+
+/**
  * Checks if two names are reasonably matching
  */
 const isNameMatch = (name1, name2) => {
@@ -41,7 +54,7 @@ const validatePartnerRequest = async (
   allParticipantsByName = null,
   allTeamsMap = null
 ) => {
-  const reqName = (requestedPartnerName || '').trim();
+  const reqName = sanitizePartnerName(requestedPartnerName);
 
   // 1. No partner requested
   if (!reqName) {
@@ -260,28 +273,82 @@ const enrichRegistrationsWithValidation = async (registrations, tournamentId) =>
     const regObj = reg.toObject ? reg.toObject() : { ...reg };
     const p = reg.participantId;
 
+    // Sanitize partner names
+    const cleanDoubles = sanitizePartnerName(regObj.doublesPartnerName);
+    const cleanMixed = sanitizePartnerName(regObj.mixedDoublesPartnerName);
+
+    // Determine participation flags with backward-compatible defaults and migration safety:
+    // If participation flag explicitly exists, preserve it!
+    // Only infer from partner presence if flag is missing/undefined.
+    const participateSingles = regObj.participateSingles !== undefined ? !!regObj.participateSingles : true;
+    const participateDoubles = regObj.participateDoubles !== undefined ? !!regObj.participateDoubles : !!cleanDoubles;
+    const participateMixedDoubles = regObj.participateMixedDoubles !== undefined ? !!regObj.participateMixedDoubles : !!cleanMixed;
+
+    regObj.participateSingles = participateSingles;
+    regObj.participateDoubles = participateDoubles;
+    regObj.participateMixedDoubles = participateMixedDoubles;
+    regObj.doublesPartnerName = participateDoubles ? cleanDoubles : '';
+    regObj.mixedDoublesPartnerName = participateMixedDoubles ? cleanMixed : '';
+
     if (p) {
       const doublesCat = p.gender === 'male' ? 'boys_doubles' : 'girls_doubles';
 
-      regObj.doublesValidation = await validatePartnerRequest(
-        p,
-        reg.doublesPartnerName,
-        reg.doublesPartnerStudentId,
-        doublesCat,
-        tournamentId,
-        participantsByName,
-        teamsMap
-      );
+      if (participateDoubles) {
+        regObj.doublesValidation = await validatePartnerRequest(
+          p,
+          cleanDoubles,
+          reg.doublesPartnerStudentId,
+          doublesCat,
+          tournamentId,
+          participantsByName,
+          teamsMap
+        );
+      } else {
+        regObj.doublesValidation = {
+          isValid: true,
+          status: 'not_participating',
+          message: 'Not participating in Doubles (Optional)',
+          requestedName: '',
+          partner: null,
+          team: null,
+          canPair: false
+        };
+      }
 
-      regObj.mixedDoublesValidation = await validatePartnerRequest(
-        p,
-        reg.mixedDoublesPartnerName,
-        reg.mixedDoublesPartnerStudentId,
-        'mixed_doubles',
-        tournamentId,
-        participantsByName,
-        teamsMap
-      );
+      if (participateMixedDoubles) {
+        regObj.mixedDoublesValidation = await validatePartnerRequest(
+          p,
+          cleanMixed,
+          reg.mixedDoublesPartnerStudentId,
+          'mixed_doubles',
+          tournamentId,
+          participantsByName,
+          teamsMap
+        );
+      } else {
+        regObj.mixedDoublesValidation = {
+          isValid: true,
+          status: 'not_participating',
+          message: 'Not participating in Mixed Doubles (Optional)',
+          requestedName: '',
+          partner: null,
+          team: null,
+          canPair: false
+        };
+      }
+
+      // Enrolled events array
+      const events = [];
+      if (participateSingles) {
+        events.push(p.gender === 'male' ? 'Boys Singles' : 'Girls Singles');
+      }
+      if (participateDoubles) {
+        events.push(p.gender === 'male' ? 'Boys Doubles' : 'Girls Doubles');
+      }
+      if (participateMixedDoubles) {
+        events.push('Mixed Doubles');
+      }
+      regObj.enrolledEvents = events;
     }
 
     enriched.push(regObj);
@@ -325,7 +392,8 @@ const getTournamentEntryValidationReport = async (tournamentId) => {
     const p = reg.participantId;
     if (!p) return;
 
-    if (reg.doublesValidation?.status === 'partner_not_registered') {
+    // Only flag unmatched partner if the participant actually chose to participate in Doubles
+    if (reg.participateDoubles && reg.doublesValidation?.status === 'partner_not_registered') {
       unmatchedPartnerRequests.push({
         participantName: p.fullName,
         gender: p.gender,
@@ -335,7 +403,8 @@ const getTournamentEntryValidationReport = async (tournamentId) => {
       });
     }
 
-    if (reg.mixedDoublesValidation?.status === 'partner_not_registered') {
+    // Only flag unmatched partner if the participant actually chose to participate in Mixed Doubles
+    if (reg.participateMixedDoubles && reg.mixedDoublesValidation?.status === 'partner_not_registered') {
       unmatchedPartnerRequests.push({
         participantName: p.fullName,
         gender: p.gender,
@@ -387,10 +456,13 @@ const syncAndAutoPairTournamentEntries = async (tournamentId, category = null) =
 
   let createdCount = 0;
 
-  // 1. Sync Singles Entries for all approved participants
+  // 1. Sync Singles Entries ONLY for participants who opted into Singles
   for (const reg of approvedRegistrations) {
     const p = reg.participantId;
     if (!p || !p.isApproved) continue;
+
+    const isSingles = reg.participateSingles !== undefined ? reg.participateSingles : true;
+    if (!isSingles) continue;
 
     const singlesCat = p.gender === 'male' ? 'boys_singles' : 'girls_singles';
 
@@ -415,7 +487,7 @@ const syncAndAutoPairTournamentEntries = async (tournamentId, category = null) =
     }
   }
 
-  // 2. Sync Doubles & Mixed Doubles Teams
+  // 2. Sync Doubles & Mixed Doubles Teams (Only if both participants opted in & nominated each other)
   if (!category || category.includes('doubles')) {
     const enriched = await enrichRegistrationsWithValidation(approvedRegistrations, tournId);
 
@@ -425,6 +497,7 @@ const syncAndAutoPairTournamentEntries = async (tournamentId, category = null) =
 
       // Doubles (Boys Doubles or Girls Doubles)
       if (
+        reg.participateDoubles &&
         (!category || category === 'boys_doubles' || category === 'girls_doubles') &&
         reg.doublesValidation?.partner &&
         reg.doublesValidation.partner.isApproved
@@ -432,7 +505,11 @@ const syncAndAutoPairTournamentEntries = async (tournamentId, category = null) =
         const p2 = reg.doublesValidation.partner;
         const doublesCat = p1.gender === 'male' ? 'boys_doubles' : 'girls_doubles';
 
-        if ((!category || category === doublesCat) && p1.gender === p2.gender && p1._id.toString() !== p2._id.toString()) {
+        // Check if partner p2 also opted into doubles
+        const p2Reg = enriched.find((r) => r.participantId?._id?.toString() === p2._id?.toString());
+        const p2ParticipatesDoubles = p2Reg?.participateDoubles !== undefined ? p2Reg.participateDoubles : true;
+
+        if (p2ParticipatesDoubles && (!category || category === doublesCat) && p1.gender === p2.gender && p1._id.toString() !== p2._id.toString()) {
           const existingTeam = await Team.findOne({
             tournamentId: tournId,
             category: doublesCat,
@@ -460,6 +537,7 @@ const syncAndAutoPairTournamentEntries = async (tournamentId, category = null) =
 
       // Mixed Doubles
       if (
+        reg.participateMixedDoubles &&
         (!category || category === 'mixed_doubles') &&
         reg.mixedDoublesValidation?.partner &&
         reg.mixedDoublesValidation.partner.isApproved
@@ -469,7 +547,11 @@ const syncAndAutoPairTournamentEntries = async (tournamentId, category = null) =
           (p1.gender === 'male' && p2.gender === 'female') ||
           (p1.gender === 'female' && p2.gender === 'male');
 
-        if (isMixedGenders && p1._id.toString() !== p2._id.toString()) {
+        // Check if partner p2 also opted into mixed doubles
+        const p2Reg = enriched.find((r) => r.participantId?._id?.toString() === p2._id?.toString());
+        const p2ParticipatesMixed = p2Reg?.participateMixedDoubles !== undefined ? p2Reg.participateMixedDoubles : true;
+
+        if (p2ParticipatesMixed && isMixedGenders && p1._id.toString() !== p2._id.toString()) {
           const existingMixed = await Team.findOne({
             tournamentId: tournId,
             category: 'mixed_doubles',

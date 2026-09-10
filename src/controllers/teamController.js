@@ -120,6 +120,14 @@ const createDoublesPair = async (req, res, next) => {
       isApproved: true
     });
 
+    // Ensure both participants' registrations reflect enrollment in this category
+    const isMixed = category === 'mixed_doubles';
+    const updateField = isMixed ? { participateMixedDoubles: true } : { participateDoubles: true };
+    await Registration.updateMany(
+      { participantId: { $in: [player1._id, player2._id] }, tournamentId: tournId },
+      { $set: updateField }
+    );
+
     await AuditLog.create({
       action: 'CREATE_DOUBLES_TEAM',
       performedBy: req.user._id,

@@ -17,6 +17,18 @@ const registrationSchema = new mongoose.Schema(
       enum: ['male', 'female'],
       required: true
     },
+    participateSingles: {
+      type: Boolean,
+      default: true
+    },
+    participateDoubles: {
+      type: Boolean,
+      default: false
+    },
+    participateMixedDoubles: {
+      type: Boolean,
+      default: false
+    },
     doublesPartnerName: {
       type: String,
       default: '',

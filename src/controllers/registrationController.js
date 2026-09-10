@@ -12,6 +12,26 @@ const {
   getTournamentEntryValidationReport
 } = require('../services/partnerValidationEngine');
 
+// Global helpers for participation and partner name sanitization
+const sanitizePartnerName = (val) => {
+  if (!val) return '';
+  const s = String(val).replace(/\s+/g, ' ').trim();
+  const lower = s.toLowerCase();
+  if (['yes', 'no', 'true', 'false', '0', '1', 'none', 'n/a', 'na', '-', 'nil', 'null', 'undefined'].includes(lower)) {
+    return '';
+  }
+  return s;
+};
+
+const normalizeBooleanParticipation = (val, defaultVal = false) => {
+  if (val === undefined || val === null || val === '') return defaultVal;
+  if (typeof val === 'boolean') return val;
+  const s = String(val).trim().toLowerCase();
+  if (['yes', 'true', '1', 'y'].includes(s)) return true;
+  if (['no', 'false', '0', 'n', 'none', 'na', 'n/a', '-'].includes(s)) return false;
+  return defaultVal;
+};
+
 // Public / Participant submission
 const submitRegistration = async (req, res, next) => {
   try {
@@ -19,6 +39,9 @@ const submitRegistration = async (req, res, next) => {
       fullName,
       gender,
       department,
+      participateSingles,
+      participateDoubles,
+      participateMixedDoubles,
       doublesPartnerName,
       mixedDoublesPartnerName,
       tournamentId
@@ -31,24 +54,49 @@ const submitRegistration = async (req, res, next) => {
       });
     }
 
-    if (gender === 'male' && !doublesPartnerName) {
+    // Determine division participation flags
+    const cleanDoublesPartner = sanitizePartnerName(doublesPartnerName);
+    const cleanMixedPartner = sanitizePartnerName(mixedDoublesPartnerName);
+
+    let isSingles = participateSingles !== undefined
+      ? normalizeBooleanParticipation(participateSingles, true)
+      : true;
+    let isDoubles = participateDoubles !== undefined
+      ? normalizeBooleanParticipation(participateDoubles, false)
+      : !!cleanDoublesPartner;
+    let isMixed = participateMixedDoubles !== undefined
+      ? normalizeBooleanParticipation(participateMixedDoubles, false)
+      : !!cleanMixedPartner;
+
+    // Validate that at least ONE division is chosen
+    if (!isSingles && !isDoubles && !isMixed) {
       return res.status(400).json({
         success: false,
-        message: 'Boys Doubles Partner Name is required.'
+        message: 'Please select at least one division to participate in (Singles, Doubles, or Mixed Doubles).'
       });
     }
 
-    if (!mixedDoublesPartnerName) {
+    // Partner validation:
+    // If Doubles is chosen, partner is REQUIRED
+    if (isDoubles && !cleanDoublesPartner) {
       return res.status(400).json({
         success: false,
-        message: 'Mixed Doubles Partner Name is required.'
+        message: `${gender === 'male' ? 'Boys' : 'Girls'} Doubles Partner Full Name is required when participating in Doubles.`
+      });
+    }
+
+    // If Mixed Doubles is chosen, partner is REQUIRED
+    if (isMixed && !cleanMixedPartner) {
+      return res.status(400).json({
+        success: false,
+        message: 'Mixed Doubles Partner Full Name is required when participating in Mixed Doubles.'
       });
     }
 
     const cleanFullName = fullName.trim();
     const cleanDepartment = department.trim();
-    const cleanDoublesPartner = (doublesPartnerName || '').trim();
-    const cleanMixedPartner = (mixedDoublesPartnerName || '').trim();
+    const finalDoublesPartner = isDoubles ? cleanDoublesPartner : '';
+    const finalMixedPartner = isMixed ? cleanMixedPartner : '';
 
     let tournId = tournamentId;
     if (!tournId) {
@@ -63,42 +111,31 @@ const submitRegistration = async (req, res, next) => {
       return res.status(400).json({ success: false, message: 'Registration for this tournament is currently closed.' });
     }
 
-    // Check if participant already exists by Full Name (case-insensitive)
+    // Check duplicate registration
     let participant = await Participant.findOne({
       fullName: { $regex: new RegExp(`^${cleanFullName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }
     });
 
     if (participant) {
-      // Check existing registration
-      const existingReg = await Registration.findOne({ participantId: participant._id, tournamentId: tournId });
-
-      if (existingReg) {
-        if (existingReg.status === 'approved') {
-          return res.status(400).json({
-            success: false,
-            code: 'REGISTRATION_LOCKED',
-            message: 'REGISTRATION ALREADY EXISTS: This athlete registration has already been approved and locked. Contact tournament administrators for corrections.',
-            registration: existingReg,
-            participant
-          });
-        }
-
-        // If pending, return pending registration notice without duplicate creation
-        return res.status(200).json({
-          success: true,
-          code: 'REGISTRATION_PENDING',
-          message: 'REGISTRATION ALREADY SUBMITTED: Your tournament entry is currently pending admin approval.',
-          registration: existingReg,
-          participant
+      const existing = await Registration.findOne({
+        participantId: participant._id,
+        tournamentId: tournId
+      });
+      if (existing) {
+        return res.status(409).json({
+          success: false,
+          code: 'ALREADY_REGISTERED',
+          message: `${cleanFullName} is already registered for this tournament.`
         });
       }
     } else {
-      // Create new Participant record
       participant = await Participant.create({
         fullName: cleanFullName,
         gender,
         studentId: '',
         department: cleanDepartment,
+        email: '',
+        phone: '',
         isApproved: false
       });
     }
@@ -107,8 +144,11 @@ const submitRegistration = async (req, res, next) => {
       participantId: participant._id,
       tournamentId: tournId,
       gender,
-      doublesPartnerName: cleanDoublesPartner,
-      mixedDoublesPartnerName: cleanMixedPartner,
+      participateSingles: isSingles,
+      participateDoubles: isDoubles,
+      participateMixedDoubles: isMixed,
+      doublesPartnerName: finalDoublesPartner,
+      mixedDoublesPartnerName: finalMixedPartner,
       status: 'pending'
     });
 
@@ -184,28 +224,60 @@ const lookupRegistrationByStudentId = async (req, res, next) => {
     const tournId = registration.tournamentId?._id || registration.tournamentId;
     const doublesCat = participant.gender === 'male' ? 'boys_doubles' : 'girls_doubles';
 
+    const isSingles = registration.participateSingles !== undefined ? registration.participateSingles : true;
+    const cleanDoubles = sanitizePartnerName(registration.doublesPartnerName);
+    const cleanMixed = sanitizePartnerName(registration.mixedDoublesPartnerName);
+
+    const isDoubles = registration.participateDoubles !== undefined ? registration.participateDoubles : !!cleanDoubles;
+    const isMixed = registration.participateMixedDoubles !== undefined ? registration.participateMixedDoubles : !!cleanMixed;
+
     const [doublesValidation, mixedDoublesValidation] = await Promise.all([
-      validatePartnerRequest(
-        participant,
-        registration.doublesPartnerName,
-        '',
-        doublesCat,
-        tournId
-      ),
-      validatePartnerRequest(
-        participant,
-        registration.mixedDoublesPartnerName,
-        '',
-        'mixed_doubles',
-        tournId
-      )
+      isDoubles
+        ? validatePartnerRequest(
+            participant,
+            cleanDoubles,
+            '',
+            doublesCat,
+            tournId
+          )
+        : Promise.resolve({
+            isValid: true,
+            status: 'not_participating',
+            message: 'Not participating in Doubles (Optional)',
+            requestedName: '',
+            partner: null,
+            team: null,
+            canPair: false
+          }),
+      isMixed
+        ? validatePartnerRequest(
+            participant,
+            cleanMixed,
+            '',
+            'mixed_doubles',
+            tournId
+          )
+        : Promise.resolve({
+            isValid: true,
+            status: 'not_participating',
+            message: 'Not participating in Mixed Doubles (Optional)',
+            requestedName: '',
+            partner: null,
+            team: null,
+            canPair: false
+          })
     ]);
 
-    const enrolledEvents = participant.gender === 'male'
-      ? ['Boys Singles', 'Boys Doubles', 'Mixed Doubles']
-      : registration.doublesPartnerName?.trim()
-      ? ['Girls Singles', 'Girls Doubles', 'Mixed Doubles']
-      : ['Girls Singles', 'Mixed Doubles'];
+    const enrolledEvents = [];
+    if (isSingles) {
+      enrolledEvents.push(participant.gender === 'male' ? 'Boys Singles' : 'Girls Singles');
+    }
+    if (isDoubles) {
+      enrolledEvents.push(participant.gender === 'male' ? 'Boys Doubles' : 'Girls Doubles');
+    }
+    if (isMixed) {
+      enrolledEvents.push('Mixed Doubles');
+    }
 
     res.json({
       success: true,
@@ -377,16 +449,41 @@ const updateRegistrationStatus = async (req, res, next) => {
 // Admin: Edit registration details (Admin Override for genuine mistakes)
 const adminEditRegistration = async (req, res, next) => {
   try {
-    const { id } = req.params;
-    const { fullName, department, doublesPartnerName, mixedDoublesPartnerName, adminNotes } = req.body;
+    const {
+      id
+    } = req.params;
+    const {
+      fullName,
+      department,
+      participateSingles,
+      participateDoubles,
+      participateMixedDoubles,
+      doublesPartnerName,
+      mixedDoublesPartnerName,
+      adminNotes
+    } = req.body;
 
     const registration = await Registration.findById(id).populate('participantId');
     if (!registration) {
       return res.status(404).json({ success: false, message: 'Registration record not found.' });
     }
 
-    if (doublesPartnerName !== undefined) registration.doublesPartnerName = doublesPartnerName.trim();
-    if (mixedDoublesPartnerName !== undefined) registration.mixedDoublesPartnerName = mixedDoublesPartnerName.trim();
+    if (participateSingles !== undefined) registration.participateSingles = !!participateSingles;
+    if (participateDoubles !== undefined) registration.participateDoubles = !!participateDoubles;
+    if (participateMixedDoubles !== undefined) registration.participateMixedDoubles = !!participateMixedDoubles;
+
+    if (doublesPartnerName !== undefined) {
+      registration.doublesPartnerName = registration.participateDoubles ? sanitizePartnerName(doublesPartnerName) : '';
+    } else if (!registration.participateDoubles) {
+      registration.doublesPartnerName = '';
+    }
+
+    if (mixedDoublesPartnerName !== undefined) {
+      registration.mixedDoublesPartnerName = registration.participateMixedDoubles ? sanitizePartnerName(mixedDoublesPartnerName) : '';
+    } else if (!registration.participateMixedDoubles) {
+      registration.mixedDoublesPartnerName = '';
+    }
+
     if (adminNotes !== undefined) registration.adminNotes = adminNotes;
     await registration.save();
 
@@ -585,6 +682,26 @@ const importParticipants = async (req, res, next) => {
     const skipped = [];
     const errors = [];
 
+    // Helper to sanitize partner names (never allow boolean strings)
+    const sanitizePartner = (val) => {
+      if (!val) return '';
+      const s = String(val).replace(/\s+/g, ' ').trim();
+      const lower = s.toLowerCase();
+      if (['yes', 'no', 'true', 'false', '0', '1', 'none', 'n/a', 'na', '-', 'nil', 'null', 'undefined'].includes(lower)) {
+        return '';
+      }
+      return s;
+    };
+
+    const normalizeBool = (val, defaultVal = false) => {
+      if (val === undefined || val === null || val === '') return defaultVal;
+      if (typeof val === 'boolean') return val;
+      const s = String(val).trim().toLowerCase();
+      if (['yes', 'true', '1', 'y'].includes(s)) return true;
+      if (['no', 'false', '0', 'n', 'none', 'na', 'n/a', '-'].includes(s)) return false;
+      return defaultVal;
+    };
+
     // Process each participant row
     for (let i = 0; i < participants.length; i++) {
       const raw = participants[i];
@@ -594,10 +711,12 @@ const importParticipants = async (req, res, next) => {
       const rawName = (raw.fullName || raw.name || raw.athlete || raw.player || '').replace(/\s+/g, ' ').trim();
       const rawGender = (raw.gender || raw.sex || '').trim().toLowerCase();
       const rawDept = (raw.department || raw.dept || raw.major || raw.branch || '').replace(/\s+/g, ' ').trim();
-      const rawBoysDoubles = (raw.boysDoublesPartner || raw.boysPartner || raw.boysDoubles || '').replace(/\s+/g, ' ').trim();
-      const rawGirlsDoubles = (raw.girlsDoublesPartner || raw.girlsPartner || raw.girlsDoubles || '').replace(/\s+/g, ' ').trim();
-      const rawMixed = (raw.mixedDoublesPartner || raw.mixedPartner || raw.mixedDoubles || '').replace(/\s+/g, ' ').trim();
-      const rawLegacyDoubles = (raw.doublesPartnerName || raw.doublesPartner || '').replace(/\s+/g, ' ').trim();
+
+      // Partner fields strictly sanitized (cannot be Yes/No/True/False)
+      const rawBoysDoubles = sanitizePartner(raw.boysDoublesPartner || raw.boysPartner || raw.boysDoubles);
+      const rawGirlsDoubles = sanitizePartner(raw.girlsDoublesPartner || raw.girlsPartner || raw.girlsDoubles);
+      const rawUnifiedDoubles = sanitizePartner(raw.doublesPartnerName || raw.doublesPartner || raw.partner);
+      const rawMixed = sanitizePartner(raw.mixedDoublesPartner || raw.mixedDoublesPartnerName || raw.mixedPartner || raw.mixedDoubles);
 
       // 1. Validation: Full Name
       if (!rawName) {
@@ -623,7 +742,7 @@ const importParticipants = async (req, res, next) => {
       }
 
       // 4. Gender compatibility with Boys/Girls Doubles
-      let assignedDoublesPartner = '';
+      let candidateDoublesPartner = '';
       if (normalizedGender === 'male') {
         if (rawGirlsDoubles) {
           errors.push({
@@ -633,7 +752,7 @@ const importParticipants = async (req, res, next) => {
           });
           continue;
         }
-        assignedDoublesPartner = rawBoysDoubles || rawLegacyDoubles;
+        candidateDoublesPartner = rawBoysDoubles || rawUnifiedDoubles;
       } else {
         if (rawBoysDoubles) {
           errors.push({
@@ -643,7 +762,65 @@ const importParticipants = async (req, res, next) => {
           });
           continue;
         }
-        assignedDoublesPartner = rawGirlsDoubles || rawLegacyDoubles;
+        candidateDoublesPartner = rawGirlsDoubles || rawUnifiedDoubles;
+      }
+      const candidateMixedPartner = rawMixed;
+
+      // Division participation detection from CSV
+      // Singles
+      let isSingles = true;
+      const rawSinglesCol = raw.participateSingles ?? raw.singles ?? raw.singlesEvent ?? raw.singlesOnly;
+      if (rawSinglesCol !== undefined && rawSinglesCol !== null && rawSinglesCol !== '') {
+        isSingles = normalizeBool(rawSinglesCol, true);
+      } else if (raw.doublesOnly || raw.mixedOnly) {
+        if (raw.doublesOnly && String(raw.doublesOnly).toLowerCase() === 'yes') isSingles = false;
+        if (raw.mixedOnly && String(raw.mixedOnly).toLowerCase() === 'yes') isSingles = false;
+      }
+
+      // Doubles
+      let isDoubles = false;
+      const rawDoublesCol = raw.participateDoubles ?? raw.doubles;
+      if (rawDoublesCol !== undefined && rawDoublesCol !== null && rawDoublesCol !== '') {
+        isDoubles = normalizeBool(rawDoublesCol, false);
+      } else {
+        isDoubles = !!candidateDoublesPartner;
+      }
+
+      // Mixed Doubles
+      let isMixed = false;
+      const rawMixedCol = raw.participateMixedDoubles ?? raw.mixed;
+      if (rawMixedCol !== undefined && rawMixedCol !== null && rawMixedCol !== '') {
+        isMixed = normalizeBool(rawMixedCol, false);
+      } else {
+        isMixed = !!candidateMixedPartner;
+      }
+
+      // Ensure participation in at least one division
+      if (!isSingles && !isDoubles && !isMixed) {
+        isSingles = true;
+      }
+
+      // Enforce data rule: if not participating, partner fields MUST be empty
+      const assignedDoublesPartner = isDoubles ? candidateDoublesPartner : '';
+      const assignedMixedPartner = isMixed ? candidateMixedPartner : '';
+
+      // Validate partner requirement when participating
+      if (isDoubles && !assignedDoublesPartner) {
+        errors.push({
+          row: rowNum,
+          name: rawName,
+          reason: `Participate Doubles is Yes but ${normalizedGender === 'male' ? 'Boys' : 'Girls'} Doubles Partner is missing.`
+        });
+        continue;
+      }
+
+      if (isMixed && !assignedMixedPartner) {
+        errors.push({
+          row: rowNum,
+          name: rawName,
+          reason: 'Participate Mixed Doubles is Yes but Mixed Doubles Partner is missing.'
+        });
+        continue;
       }
 
       try {
@@ -671,23 +848,14 @@ const importParticipants = async (req, res, next) => {
               continue;
             }
 
-            // Pending registration -> update partner nominations and department
-            let regUpdated = false;
-            if (assignedDoublesPartner !== undefined && existingReg.doublesPartnerName !== assignedDoublesPartner) {
-              existingReg.doublesPartnerName = assignedDoublesPartner;
-              regUpdated = true;
-            }
-            if (rawMixed !== undefined && existingReg.mixedDoublesPartnerName !== rawMixed) {
-              existingReg.mixedDoublesPartnerName = rawMixed;
-              regUpdated = true;
-            }
-            if (normalizedGender && existingReg.gender !== normalizedGender) {
-              existingReg.gender = normalizedGender;
-              regUpdated = true;
-            }
-            if (regUpdated) {
-              await existingReg.save();
-            }
+            // Pending registration -> update participation and partner nominations
+            existingReg.participateSingles = isSingles;
+            existingReg.participateDoubles = isDoubles;
+            existingReg.participateMixedDoubles = isMixed;
+            existingReg.doublesPartnerName = assignedDoublesPartner;
+            existingReg.mixedDoublesPartnerName = assignedMixedPartner;
+            if (normalizedGender) existingReg.gender = normalizedGender;
+            await existingReg.save();
 
             if (rawDept && participant.department !== rawDept) {
               participant.department = rawDept;
@@ -708,8 +876,11 @@ const importParticipants = async (req, res, next) => {
               participantId: participant._id,
               tournamentId: tournId,
               gender: normalizedGender,
+              participateSingles: isSingles,
+              participateDoubles: isDoubles,
+              participateMixedDoubles: isMixed,
               doublesPartnerName: assignedDoublesPartner,
-              mixedDoublesPartnerName: rawMixed,
+              mixedDoublesPartnerName: assignedMixedPartner,
               status: 'pending'
             });
 
@@ -744,8 +915,11 @@ const importParticipants = async (req, res, next) => {
           participantId: participant._id,
           tournamentId: tournId,
           gender: normalizedGender,
+          participateSingles: isSingles,
+          participateDoubles: isDoubles,
+          participateMixedDoubles: isMixed,
           doublesPartnerName: assignedDoublesPartner,
-          mixedDoublesPartnerName: rawMixed,
+          mixedDoublesPartnerName: assignedMixedPartner,
           status: 'pending'
         });
 
@@ -807,6 +981,9 @@ const adminAddPlayer = async (req, res, next) => {
       fullName,
       gender,
       department,
+      participateSingles,
+      participateDoubles,
+      participateMixedDoubles,
       boysDoublesPartner,
       girlsDoublesPartner,
       doublesPartnerName,
@@ -835,10 +1012,30 @@ const adminAddPlayer = async (req, res, next) => {
       });
     }
 
-    let assignedDoubles = (normalizedGender === 'male' ? (boysDoublesPartner || doublesPartnerName) : (girlsDoublesPartner || doublesPartnerName)) || '';
-    assignedDoubles = (assignedDoubles || '').replace(/\s+/g, ' ').trim();
+    let candidateDoubles = (normalizedGender === 'male' ? (boysDoublesPartner || doublesPartnerName) : (girlsDoublesPartner || doublesPartnerName)) || '';
+    candidateDoubles = sanitizePartnerName(candidateDoubles);
 
-    let assignedMixed = (mixedDoublesPartnerName || mixedDoublesPartner || '').replace(/\s+/g, ' ').trim();
+    let candidateMixed = sanitizePartnerName(mixedDoublesPartnerName || mixedDoublesPartner || '');
+
+    let isDoubles = participateDoubles !== undefined
+      ? normalizeBooleanParticipation(participateDoubles, false)
+      : !!candidateDoubles;
+    let isMixed = participateMixedDoubles !== undefined
+      ? normalizeBooleanParticipation(participateMixedDoubles, false)
+      : !!candidateMixed;
+    let isSingles = participateSingles !== undefined
+      ? normalizeBooleanParticipation(participateSingles, true)
+      : true;
+
+    let assignedDoubles = isDoubles ? candidateDoubles : '';
+    let assignedMixed = isMixed ? candidateMixed : '';
+
+    if (!isSingles && !isDoubles && !isMixed) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please select at least one division to participate in.'
+      });
+    }
 
     let tournId = tournamentId;
     if (!tournId) {
@@ -870,8 +1067,11 @@ const adminAddPlayer = async (req, res, next) => {
         }
 
         // Update pending registration
-        if (assignedDoubles) existingReg.doublesPartnerName = assignedDoubles;
-        if (assignedMixed) existingReg.mixedDoublesPartnerName = assignedMixed;
+        existingReg.participateSingles = isSingles;
+        existingReg.participateDoubles = isDoubles;
+        existingReg.participateMixedDoubles = isMixed;
+        existingReg.doublesPartnerName = assignedDoubles;
+        existingReg.mixedDoublesPartnerName = assignedMixed;
         if (normalizedGender) existingReg.gender = normalizedGender;
         await existingReg.save();
 
@@ -892,6 +1092,9 @@ const adminAddPlayer = async (req, res, next) => {
           participantId: participant._id,
           tournamentId: tournId,
           gender: normalizedGender,
+          participateSingles: isSingles,
+          participateDoubles: isDoubles,
+          participateMixedDoubles: isMixed,
           doublesPartnerName: assignedDoubles,
           mixedDoublesPartnerName: assignedMixed,
           status: 'pending'
@@ -926,6 +1129,9 @@ const adminAddPlayer = async (req, res, next) => {
       participantId: participant._id,
       tournamentId: tournId,
       gender: normalizedGender,
+      participateSingles: isSingles,
+      participateDoubles: isDoubles,
+      participateMixedDoubles: isMixed,
       doublesPartnerName: assignedDoubles,
       mixedDoublesPartnerName: assignedMixed,
       status: 'pending'
