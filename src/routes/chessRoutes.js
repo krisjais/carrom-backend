@@ -28,6 +28,7 @@ router.get('/admin/dashboard', chessAdminAuth, adminCtrl.getDashboardStats);
 // ADMIN PLAYER MANAGEMENT
 // -------------------------------------------------------------
 router.get('/admin/players', chessAdminAuth, adminCtrl.getAdminPlayers);
+router.post('/admin/players', chessAdminAuth, adminCtrl.createPlayer);
 router.post('/admin/players/import', chessAdminAuth, adminCtrl.importChessPlayers);
 router.post('/admin/players/bulk-status', chessAdminAuth, adminCtrl.bulkUpdatePlayerStatus);
 router.post('/admin/players/bulk-delete', chessAdminAuth, adminCtrl.bulkDeletePlayers);
@@ -37,10 +38,13 @@ router.patch('/admin/players/:id', chessAdminAuth, adminCtrl.updatePlayer);
 router.delete('/admin/players/:id', chessAdminAuth, adminCtrl.deletePlayer);
 
 // -------------------------------------------------------------
-// ADMIN MATCH MANAGEMENT
+// ADMIN MATCH & ROUND MANAGEMENT
 // -------------------------------------------------------------
 router.get('/admin/matches', chessAdminAuth, adminCtrl.getAdminMatches);
 router.post('/admin/matches', chessAdminAuth, adminCtrl.createMatch);
+router.delete('/admin/rounds/all', chessAdminAuth, adminCtrl.deleteAllRounds);
+router.delete('/admin/rounds', chessAdminAuth, adminCtrl.deleteAllRounds);
+router.delete('/admin/rounds/:round', chessAdminAuth, adminCtrl.deleteRound);
 router.post('/admin/matches/generate', chessAdminAuth, adminCtrl.generateMatches);
 router.post('/admin/matches/:id/start', chessAdminAuth, adminCtrl.startMatch);
 router.put('/admin/matches/:id/start', chessAdminAuth, adminCtrl.startMatch);

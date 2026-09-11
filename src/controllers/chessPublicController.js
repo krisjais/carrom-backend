@@ -263,14 +263,21 @@ exports.getMatchById = async (req, res, next) => {
     const config = await getConfiguration();
 
     if (isDbConnected()) {
-      const match = await ChessMatch.findById(id).populate('player1').populate('player2');
+      let query = mongoose.Types.ObjectId.isValid(id) ? { _id: id } : { matchId: id };
+      let match = await ChessMatch.findOne(query).populate('player1').populate('player2').populate('byePlayer');
+      if (!match && !mongoose.Types.ObjectId.isValid(id)) {
+        match = await ChessMatch.findOne({ matchId: new RegExp(`^${id}$`, 'i') }).populate('player1').populate('player2').populate('byePlayer');
+      }
       if (!match) {
         return res.status(404).json({ success: false, message: 'Match not found.' });
       }
       return res.json({ success: true, data: { match, settings: config } });
     }
 
-    const match = memoryStore.matches.find(m => m._id === id || m.matchId === id);
+    const cleanId = String(id).toLowerCase();
+    const match = memoryStore.matches.find(
+      m => m._id === id || m.matchId === id || (m.matchId && m.matchId.toLowerCase() === cleanId)
+    );
     if (!match) {
       return res.status(404).json({ success: false, message: 'Match not found.' });
     }

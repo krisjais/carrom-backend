@@ -57,14 +57,25 @@ const startMatch = async (matchId) => {
 
 const createManualMatch = async (matchData) => {
   const { player1Id, player2Id, round, roundName, scheduledTime, durationMinutes } = matchData;
+  let customRoundName = (roundName || (typeof round === 'string' && isNaN(Number(round)) ? round : '') || '').trim();
   let targetRound = Number(round);
-  let customRoundName = roundName ? String(roundName).trim() : '';
 
-  if (isNaN(targetRound)) {
-    if (!customRoundName && round) {
-      customRoundName = String(round).trim();
+  if (isNaN(targetRound) || targetRound < 1) {
+    const lower = customRoundName.toLowerCase();
+    const matchNum = customRoundName.match(/\d+/);
+    if (matchNum) {
+      targetRound = parseInt(matchNum[0], 10);
+    } else if (lower.includes('grand final')) {
+      targetRound = 7;
+    } else if (lower.includes('final')) {
+      targetRound = 6;
+    } else if (lower.includes('semi')) {
+      targetRound = 5;
+    } else if (lower.includes('quarter')) {
+      targetRound = 4;
+    } else {
+      targetRound = 1;
     }
-    targetRound = 1;
   }
   if (!customRoundName) {
     customRoundName = `Round ${targetRound}`;

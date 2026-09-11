@@ -7,9 +7,35 @@ const { getConfiguration } = require('./scoringService');
 
 const generateRoundPairings = async (roundNumber = null, roundName = null) => {
   const config = await getConfiguration();
-  const targetRound = Number(roundNumber) || config.currentRound || 1;
-  const customRoundName = roundName ? String(roundName).trim() : `Round ${targetRound}`;
   const isDbConnected = mongoose.connection.readyState === 1;
+
+  // Resolve customRoundName and targetRound flexibly from text
+  let customRoundName = (roundName || (typeof roundNumber === 'string' && isNaN(Number(roundNumber)) ? roundNumber : '') || '').trim();
+  let targetRound = Number(roundNumber);
+
+  if (isNaN(targetRound) || targetRound < 1) {
+    const lower = customRoundName.toLowerCase();
+    const matchNum = customRoundName.match(/\d+/);
+    if (matchNum) {
+      targetRound = parseInt(matchNum[0], 10);
+    } else if (lower.includes('grand final')) {
+      targetRound = 7;
+    } else if (lower.includes('final')) {
+      targetRound = 6;
+    } else if (lower.includes('semi')) {
+      targetRound = 5;
+    } else if (lower.includes('quarter')) {
+      targetRound = 4;
+    } else {
+      const existingMatches = isDbConnected ? await ChessMatch.find({}, 'round') : memoryStore.matches;
+      const maxExisting = existingMatches.reduce((max, m) => Math.max(max, m.round || 0), 0);
+      targetRound = maxExisting + 1;
+    }
+  }
+
+  if (!customRoundName) {
+    customRoundName = `Round ${targetRound}`;
+  }
 
   // 1. Get all eligible players (Approved or Active status)
   const eligiblePlayers = isDbConnected
@@ -24,13 +50,22 @@ const generateRoundPairings = async (roundNumber = null, roundName = null) => {
     throw new Error('At least 2 approved players are required to generate pairings.');
   }
 
-  // Check if matches already exist for targetRound
-  const existingMatches = isDbConnected
+  // Check if matches already exist for targetRound or exact same round name
+  let existingMatches = isDbConnected
     ? await ChessMatch.find({ round: targetRound })
     : memoryStore.matches.filter(m => m.round === targetRound);
 
-  if (existingMatches.length > 0) {
-    throw new Error(`Matches for Round ${targetRound} have already been generated.`);
+  const exactSameRound = existingMatches.find(m => (m.roundName || '').toLowerCase() === customRoundName.toLowerCase());
+  if (exactSameRound) {
+    throw new Error(`Matches for "${customRoundName}" have already been generated.`);
+  }
+
+  // If numeric round was taken by another named round, auto-increment round number
+  while (existingMatches.length > 0) {
+    targetRound++;
+    existingMatches = isDbConnected
+      ? await ChessMatch.find({ round: targetRound })
+      : memoryStore.matches.filter(m => m.round === targetRound);
   }
 
   // Retrieve all previous matches
@@ -47,81 +82,90 @@ const generateRoundPairings = async (roundNumber = null, roundName = null) => {
 
   let playerPool = [...eligiblePlayers];
 
-  // 2. Knockout rule: After Round 1, players who lost will NOT go to next round
+  // 2. Knockout rule: If previous round matches exist, require them to be completed and advance winners
   if (targetRound > 1) {
     const prevRoundMatches = pastMatches.filter(m => m.round === targetRound - 1);
-    if (prevRoundMatches.length === 0) {
-      throw new Error(`Cannot generate Round ${targetRound} pairings before Round ${targetRound - 1} matches are scheduled.`);
-    }
-
-    const uncompleted = prevRoundMatches.filter(m => m.status !== 'completed');
-    if (uncompleted.length > 0) {
-      throw new Error(`Round ${targetRound - 1} has ${uncompleted.length} uncompleted match(es). Please complete all matches in the previous round before generating Round ${targetRound}.`);
-    }
-
-    const advancingPlayerIds = new Set();
-    prevRoundMatches.forEach(m => {
-      const p1Id = (m.player1?._id || m.player1 || m.byePlayer?._id || m.byePlayer)?.toString();
-      const p2Id = (m.player2?._id || m.player2)?.toString();
-
-      if (m.isBye) {
-        if (p1Id) advancingPlayerIds.add(p1Id);
-      } else if (m.winner === 'player1') {
-        if (p1Id) advancingPlayerIds.add(p1Id);
-      } else if (m.winner === 'player2') {
-        if (p2Id) advancingPlayerIds.add(p2Id);
-      } else if (m.winner === 'draw') {
-        // In case of a draw, advance player with higher material score
-        if ((m.player1MaterialScore || 0) >= (m.player2MaterialScore || 0)) {
-          if (p1Id) advancingPlayerIds.add(p1Id);
-        } else {
-          if (p2Id) advancingPlayerIds.add(p2Id);
-        }
-      } else if (m.winnerPlayer) {
-        advancingPlayerIds.add(m.winnerPlayer.toString());
+    if (prevRoundMatches.length > 0) {
+      const uncompleted = prevRoundMatches.filter(m => m.status !== 'completed');
+      if (uncompleted.length > 0) {
+        throw new Error(`Round ${targetRound - 1} has ${uncompleted.length} uncompleted match(es). Please complete all matches in the previous round before generating ${customRoundName}.`);
       }
-    });
 
-    // Keep ONLY winning/advancing players in the pool
-    playerPool = playerPool.filter(p => {
-      const idStr = (p._id || p.playerId).toString();
-      return advancingPlayerIds.has(idStr);
-    });
+      const advancingPlayerIds = new Set();
+      prevRoundMatches.forEach(m => {
+        const p1Id = (m.player1?._id || m.player1 || m.byePlayer?._id || m.byePlayer)?.toString();
+        const p2Id = (m.player2?._id || m.player2)?.toString();
 
-    if (playerPool.length < 2) {
-      throw new Error(`Only ${playerPool.length} advancing player remaining. The tournament has concluded with a champion!`);
+        if (m.isBye) {
+          if (p1Id) advancingPlayerIds.add(p1Id);
+        } else if (m.winner === 'player1') {
+          if (p1Id) advancingPlayerIds.add(p1Id);
+        } else if (m.winner === 'player2') {
+          if (p2Id) advancingPlayerIds.add(p2Id);
+        } else if (m.winner === 'draw') {
+          // In case of a draw, advance player with higher material score
+          if ((m.player1MaterialScore || 0) >= (m.player2MaterialScore || 0)) {
+            if (p1Id) advancingPlayerIds.add(p1Id);
+          } else {
+            if (p2Id) advancingPlayerIds.add(p2Id);
+          }
+        } else if (m.winnerPlayer) {
+          advancingPlayerIds.add(m.winnerPlayer.toString());
+        }
+      });
+
+      // Keep ONLY winning/advancing players in the pool
+      playerPool = playerPool.filter(p => {
+        const idStr = (p._id || p.playerId).toString();
+        return advancingPlayerIds.has(idStr);
+      });
+
+      if (playerPool.length < 2) {
+        throw new Error(`Only ${playerPool.length} advancing player remaining. The tournament has concluded with a champion!`);
+      }
     }
   }
 
-  // Sort remaining pool by points table: tournamentPoints desc, materialPoints desc, wins desc
+  // Sort remaining pool
   playerPool.sort((a, b) => {
-    return (b.tournamentPoints || 0) - (a.tournamentPoints || 0) ||
-           (b.materialPoints || 0) - (a.materialPoints || 0) ||
+    return (b.materialPoints || 0) - (a.materialPoints || 0) ||
+           (b.tournamentPoints || 0) - (a.tournamentPoints || 0) ||
            (b.wins || 0) - (a.wins || 0);
   });
 
   const createdMatches = [];
   let mCounter = (isDbConnected ? await ChessMatch.countDocuments() : memoryStore.matches.length) + 1;
 
-  // 3. Odd Number of Players: Player with HIGHEST points goes to the next round by default (BYE)
+  // 3. Odd Number of Players: Check MATERIAL POINTS to select the player who skips this round (BYE)
   if (playerPool.length % 2 !== 0) {
-    // Find the highest-point player from the top who hasn't had a bye yet
-    let byeIndex = -1;
-    for (let i = 0; i < playerPool.length; i++) {
-      const p = playerPool[i];
+    // Sort candidates primarily by MATERIAL POINTS descending so player with highest material score skips the round
+    const candidates = [...playerPool].sort((a, b) => {
+      const matDiff = (b.materialPoints || 0) - (a.materialPoints || 0);
+      if (matDiff !== 0) return matDiff;
+      const ptDiff = (b.tournamentPoints || 0) - (a.tournamentPoints || 0);
+      if (ptDiff !== 0) return ptDiff;
+      return (b.wins || 0) - (a.wins || 0);
+    });
+
+    // Find the player with highest material points who has not yet received a bye
+    let selectedCandidate = null;
+    for (let i = 0; i < candidates.length; i++) {
+      const p = candidates[i];
       const pIdStr = (p._id || p.playerId).toString();
       const hasBye = pastMatches.some(m => m.isBye && (m.byePlayer?._id || m.byePlayer)?.toString() === pIdStr);
       if (!hasBye) {
-        byeIndex = i;
+        selectedCandidate = p;
         break;
       }
     }
 
-    // If all remaining players already had a bye, pick the top player on points table
-    if (byeIndex === -1) {
-      byeIndex = 0;
+    // If all remaining candidates already had a bye, pick the one with highest material points
+    if (!selectedCandidate) {
+      selectedCandidate = candidates[0];
     }
 
+    // Remove the selected bye player from playerPool so remaining players can be paired together
+    const byeIndex = playerPool.findIndex(p => (p._id || p.playerId).toString() === (selectedCandidate._id || selectedCandidate.playerId).toString());
     const byePlayer = playerPool.splice(byeIndex, 1)[0];
     const matchId = `CHS-M${String(mCounter++).padStart(3, '0')}`;
 
@@ -137,7 +181,7 @@ const generateRoundPairings = async (roundNumber = null, roundName = null) => {
       durationMinutes: config.matchDuration || 10,
       actualStartTime: new Date(),
       actualEndTime: new Date(),
-      notes: `Automatic BYE awarded for ${customRoundName} to leaderboard leader.`
+      notes: `Automatic BYE awarded for ${customRoundName} based on highest material rating (${byePlayer.materialPoints || 0} pts) - player skips this round.`
     };
 
     let byeMatch;

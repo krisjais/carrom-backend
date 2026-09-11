@@ -3,6 +3,7 @@ const ChessPlayer = require('../models/ChessPlayer');
 const ChessMatch = require('../models/ChessMatch');
 const ChessRound = require('../models/ChessRound');
 const ChessConfiguration = require('../models/ChessConfiguration');
+const ChessStandings = require('../models/ChessStandings');
 const memoryStore = require('../utils/chessMemoryDb');
 const { getConfiguration } = require('../services/scoringService');
 const { generateRoundPairings } = require('../services/pairingService');
@@ -182,6 +183,99 @@ exports.updatePlayer = async (req, res, next) => {
   }
 };
 
+// Admin Create / Add Player Directly
+exports.createPlayer = async (req, res, next) => {
+  try {
+    const { fullName, email, phone, department, status } = req.body;
+
+    if (!fullName || !department) {
+      return res.status(400).json({
+        success: false,
+        message: 'Full Name and Department are required.'
+      });
+    }
+
+    const cleanName = fullName.replace(/\s+/g, ' ').trim();
+    const cleanDept = department.trim();
+    const cleanPhone = phone ? phone.trim() : '';
+    let targetStatus = status || 'Approved';
+
+    if (isDbConnected()) {
+      const totalCount = await ChessPlayer.countDocuments();
+      let playerId = `CHS-${String(totalCount + 1).padStart(3, '0')}`;
+      let candidateEmail = email ? email.toLowerCase().trim() : `${cleanName.toLowerCase().replace(/[^a-z0-9]/g, '')}_${Date.now().toString().slice(-4)}@tournament.local`;
+
+      if (email) {
+        const existing = await ChessPlayer.findOne({ email: candidateEmail });
+        if (existing) {
+          return res.status(400).json({
+            success: false,
+            message: `A player with email ${email} already exists.`
+          });
+        }
+      }
+
+      let existsId = await ChessPlayer.findOne({ playerId });
+      let counter = totalCount + 1;
+      while (existsId) {
+        counter++;
+        playerId = `CHS-${String(counter).padStart(3, '0')}`;
+        existsId = await ChessPlayer.findOne({ playerId });
+      }
+
+      const player = await ChessPlayer.create({
+        playerId,
+        fullName: cleanName,
+        email: candidateEmail,
+        phone: cleanPhone,
+        department: cleanDept,
+        status: targetStatus
+      });
+
+      await recalculateAllStandings();
+
+      return res.status(201).json({
+        success: true,
+        message: `Player ${player.fullName} added successfully with ID ${player.playerId}.`,
+        data: player
+      });
+    }
+
+    // In-Memory Fallback
+    const totalCount = memoryStore.players.length;
+    let playerId = `CHS-${String(totalCount + 1).padStart(3, '0')}`;
+    let candidateEmail = email ? email.toLowerCase().trim() : `${cleanName.toLowerCase().replace(/[^a-z0-9]/g, '')}_${Date.now().toString().slice(-4)}@tournament.local`;
+
+    const newPlayer = {
+      _id: `player_mem_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+      playerId,
+      fullName: cleanName,
+      email: candidateEmail,
+      phone: cleanPhone,
+      department: cleanDept,
+      status: targetStatus,
+      tournamentPoints: 0,
+      materialPoints: 0,
+      matchesPlayed: 0,
+      wins: 0,
+      draws: 0,
+      losses: 0,
+      createdAt: new Date()
+    };
+
+    memoryStore.players.push(newPlayer);
+    await recalculateAllStandings();
+
+    res.status(201).json({
+      success: true,
+      message: `Player ${newPlayer.fullName} added successfully with ID ${newPlayer.playerId}.`,
+      data: newPlayer
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
 // Admin Delete Player
 exports.deletePlayer = async (req, res, next) => {
   try {
@@ -217,6 +311,114 @@ exports.deletePlayer = async (req, res, next) => {
     res.json({
       success: true,
       message: 'Player deleted successfully.'
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// Admin Delete Round (Deletes all fixtures in specified round)
+exports.deleteRound = async (req, res, next) => {
+  try {
+    const roundNum = parseInt(req.params.round, 10);
+    if (isNaN(roundNum) || roundNum < 1) {
+      return res.status(400).json({ success: false, message: 'Invalid round number.' });
+    }
+
+    let deletedCount = 0;
+    if (isDbConnected()) {
+      const deleteRes = await ChessMatch.deleteMany({ round: roundNum });
+      deletedCount = deleteRes.deletedCount || 0;
+      await ChessRound.deleteOne({ roundNumber: roundNum });
+      await recalculateAllStandings();
+
+      return res.json({
+        success: true,
+        message: `Round ${roundNum} and its ${deletedCount} match(es) were deleted successfully.`,
+        data: { round: roundNum, deletedCount }
+      });
+    }
+
+    const initialLen = memoryStore.matches.length;
+    memoryStore.matches = memoryStore.matches.filter(m => m.round !== roundNum);
+    deletedCount = initialLen - memoryStore.matches.length;
+    memoryStore.rounds = memoryStore.rounds.filter(r => r.roundNumber !== roundNum);
+    await recalculateAllStandings();
+
+    res.json({
+      success: true,
+      message: `Round ${roundNum} and its ${deletedCount} match(es) were deleted successfully.`,
+      data: { round: roundNum, deletedCount }
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// Admin Delete All Rounds (Wipes all matches and rounds, resets scores, keeps players)
+exports.deleteAllRounds = async (req, res, next) => {
+  try {
+    let deletedMatches = 0;
+    let deletedRounds = 0;
+
+    if (isDbConnected()) {
+      const matchRes = await ChessMatch.deleteMany({});
+      deletedMatches = matchRes.deletedCount || 0;
+      const roundRes = await ChessRound.deleteMany({});
+      deletedRounds = roundRes.deletedCount || 0;
+
+      // Reset all players stats
+      await ChessPlayer.updateMany({}, {
+        $set: {
+          matchesPlayed: 0,
+          wins: 0,
+          draws: 0,
+          losses: 0,
+          byes: 0,
+          materialPoints: 0,
+          tournamentPoints: 0,
+          tieBreakScore: 0,
+          rank: 0
+        }
+      });
+
+      let config = await ChessConfiguration.findOne();
+      if (config) {
+        config.currentRound = 1;
+        await config.save();
+      }
+
+      await recalculateAllStandings();
+
+      return res.json({
+        success: true,
+        message: `All ${deletedMatches} match(es) and ${deletedRounds} round(s) deleted successfully. Tournament reset to Round 1.`,
+        data: { deletedMatches, deletedRounds }
+      });
+    }
+
+    deletedMatches = memoryStore.matches.length;
+    deletedRounds = memoryStore.rounds.length;
+    memoryStore.matches = [];
+    memoryStore.rounds = [];
+    memoryStore.players.forEach(p => {
+      p.matchesPlayed = 0;
+      p.wins = 0;
+      p.draws = 0;
+      p.losses = 0;
+      p.byes = 0;
+      p.materialPoints = 0;
+      p.tournamentPoints = 0;
+      p.tieBreakScore = 0;
+      p.rank = 0;
+    });
+    memoryStore.configuration.currentRound = 1;
+    await recalculateAllStandings();
+
+    res.json({
+      success: true,
+      message: `All ${deletedMatches} match(es) and ${deletedRounds} round(s) deleted successfully. Tournament reset to Round 1.`,
+      data: { deletedMatches, deletedRounds }
     });
   } catch (err) {
     next(err);
@@ -763,6 +965,7 @@ exports.resetTournamentData = async (req, res, next) => {
       await ChessMatch.deleteMany({});
       await ChessPlayer.deleteMany({});
       await ChessRound.deleteMany({});
+      await ChessStandings.deleteMany({});
       let config = await ChessConfiguration.findOne();
       if (config) {
         config.currentRound = 1;
