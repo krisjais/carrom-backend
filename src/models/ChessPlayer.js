@@ -28,7 +28,7 @@ const chessPlayerSchema = new mongoose.Schema(
     department: {
       type: String,
       required: true,
-      enum: ['First Year', 'Second Year', 'IT Team', 'MJ Team', 'HR Team'],
+      enum: ['First Year', 'Second Year', 'IT Team', 'MJ Team', 'HR Team', 'Staff'],
       trim: true
     },
     status: {
