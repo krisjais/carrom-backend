@@ -9,7 +9,8 @@ const User = require('../models/User');
 const {
   validatePartnerRequest,
   enrichRegistrationsWithValidation,
-  getTournamentEntryValidationReport
+  getTournamentEntryValidationReport,
+  ensurePartnerRegistration
 } = require('../services/partnerValidationEngine');
 
 // Global helpers for participation and partner name sanitization
@@ -122,6 +123,50 @@ const submitRegistration = async (req, res, next) => {
         tournamentId: tournId
       });
       if (existing) {
+        // If this participant was previously auto-created as a partner and is pending, allow them to update & complete their registration
+        if (existing.isAutoCreatedPartner && existing.status === 'pending') {
+          existing.participateSingles = isSingles;
+          existing.participateDoubles = isDoubles;
+          existing.participateMixedDoubles = isMixed;
+          if (finalDoublesPartner) existing.doublesPartnerName = finalDoublesPartner;
+          if (finalMixedPartner) existing.mixedDoublesPartnerName = finalMixedPartner;
+          existing.isAutoCreatedPartner = false;
+          await existing.save();
+
+          if (cleanDepartment && participant.department !== cleanDepartment) {
+            participant.department = cleanDepartment;
+            await participant.save();
+          }
+
+          if (isDoubles && finalDoublesPartner) {
+            await ensurePartnerRegistration({
+              registrant: participant,
+              category: 'doubles',
+              partnerName: finalDoublesPartner,
+              tournamentId: tournId,
+              isApproved: false
+            });
+          }
+
+          if (isMixed && finalMixedPartner) {
+            await ensurePartnerRegistration({
+              registrant: participant,
+              category: 'mixed_doubles',
+              partnerName: finalMixedPartner,
+              tournamentId: tournId,
+              isApproved: false
+            });
+          }
+
+          return res.status(200).json({
+            success: true,
+            code: 'REGISTRATION_SUBMITTED',
+            message: 'Your partner registration has been updated and completed successfully. Your entry is now pending admin approval.',
+            registration: existing,
+            participant
+          });
+        }
+
         return res.status(409).json({
           success: false,
           code: 'ALREADY_REGISTERED',
@@ -151,6 +196,27 @@ const submitRegistration = async (req, res, next) => {
       mixedDoublesPartnerName: finalMixedPartner,
       status: 'pending'
     });
+
+    // Auto-register nominated partner(s) so they do NOT need to register separately!
+    if (isDoubles && finalDoublesPartner) {
+      await ensurePartnerRegistration({
+        registrant: participant,
+        category: 'doubles',
+        partnerName: finalDoublesPartner,
+        tournamentId: tournId,
+        isApproved: false
+      });
+    }
+
+    if (isMixed && finalMixedPartner) {
+      await ensurePartnerRegistration({
+        registrant: participant,
+        category: 'mixed_doubles',
+        partnerName: finalMixedPartner,
+        tournamentId: tournId,
+        isApproved: false
+      });
+    }
 
     res.status(201).json({
       success: true,
@@ -422,6 +488,46 @@ const updateRegistrationStatus = async (req, res, next) => {
       });
 
       if (status === 'approved') {
+        const cleanDoubles = sanitizePartnerName(registration.doublesPartnerName);
+        const cleanMixed = sanitizePartnerName(registration.mixedDoublesPartnerName);
+
+        if (registration.participateDoubles && cleanDoubles) {
+          const doublesPartner = await Participant.findOne({
+            fullName: { $regex: new RegExp(`^${cleanDoubles.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }
+          });
+          if (doublesPartner) {
+            const partnerReg = await Registration.findOne({
+              participantId: doublesPartner._id,
+              tournamentId: registration.tournamentId
+            });
+            // If partner was auto-created or is pending without singles, auto-approve them with the primary registrant
+            if (partnerReg && partnerReg.status !== 'approved' && !partnerReg.participateSingles) {
+              partnerReg.status = 'approved';
+              await partnerReg.save();
+              doublesPartner.isApproved = true;
+              await doublesPartner.save();
+            }
+          }
+        }
+
+        if (registration.participateMixedDoubles && cleanMixed) {
+          const mixedPartner = await Participant.findOne({
+            fullName: { $regex: new RegExp(`^${cleanMixed.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }
+          });
+          if (mixedPartner) {
+            const partnerReg = await Registration.findOne({
+              participantId: mixedPartner._id,
+              tournamentId: registration.tournamentId
+            });
+            if (partnerReg && partnerReg.status !== 'approved' && !partnerReg.participateSingles) {
+              partnerReg.status = 'approved';
+              await partnerReg.save();
+              mixedPartner.isApproved = true;
+              await mixedPartner.save();
+            }
+          }
+        }
+
         const { syncAndAutoPairTournamentEntries } = require('../services/partnerValidationEngine');
         await syncAndAutoPairTournamentEntries(registration.tournamentId);
       }
@@ -492,6 +598,27 @@ const adminEditRegistration = async (req, res, next) => {
       if (fullName) p.fullName = fullName.trim();
       if (department) p.department = department.trim();
       await p.save();
+    }
+
+    // Auto-register partner(s) if added/edited
+    if (registration.participantId && registration.participateDoubles && registration.doublesPartnerName) {
+      await ensurePartnerRegistration({
+        registrant: registration.participantId,
+        category: 'doubles',
+        partnerName: registration.doublesPartnerName,
+        tournamentId: registration.tournamentId,
+        isApproved: registration.status === 'approved'
+      });
+    }
+
+    if (registration.participantId && registration.participateMixedDoubles && registration.mixedDoublesPartnerName) {
+      await ensurePartnerRegistration({
+        registrant: registration.participantId,
+        category: 'mixed_doubles',
+        partnerName: registration.mixedDoublesPartnerName,
+        tournamentId: registration.tournamentId,
+        isApproved: registration.status === 'approved'
+      });
     }
 
     await AuditLog.create({
@@ -862,6 +989,25 @@ const importParticipants = async (req, res, next) => {
               await participant.save();
             }
 
+            if (isDoubles && assignedDoublesPartner) {
+              await ensurePartnerRegistration({
+                registrant: participant,
+                category: 'doubles',
+                partnerName: assignedDoublesPartner,
+                tournamentId: tournId,
+                isApproved: false
+              });
+            }
+            if (isMixed && assignedMixedPartner) {
+              await ensurePartnerRegistration({
+                registrant: participant,
+                category: 'mixed_doubles',
+                partnerName: assignedMixedPartner,
+                tournamentId: tournId,
+                isApproved: false
+              });
+            }
+
             imported.push({
               row: rowNum,
               name: participant.fullName,
@@ -887,6 +1033,25 @@ const importParticipants = async (req, res, next) => {
             if (rawDept && participant.department !== rawDept) {
               participant.department = rawDept;
               await participant.save();
+            }
+
+            if (isDoubles && assignedDoublesPartner) {
+              await ensurePartnerRegistration({
+                registrant: participant,
+                category: 'doubles',
+                partnerName: assignedDoublesPartner,
+                tournamentId: tournId,
+                isApproved: false
+              });
+            }
+            if (isMixed && assignedMixedPartner) {
+              await ensurePartnerRegistration({
+                registrant: participant,
+                category: 'mixed_doubles',
+                partnerName: assignedMixedPartner,
+                tournamentId: tournId,
+                isApproved: false
+              });
             }
 
             imported.push({
@@ -922,6 +1087,25 @@ const importParticipants = async (req, res, next) => {
           mixedDoublesPartnerName: assignedMixedPartner,
           status: 'pending'
         });
+
+        if (isDoubles && assignedDoublesPartner) {
+          await ensurePartnerRegistration({
+            registrant: participant,
+            category: 'doubles',
+            partnerName: assignedDoublesPartner,
+            tournamentId: tournId,
+            isApproved: false
+          });
+        }
+        if (isMixed && assignedMixedPartner) {
+          await ensurePartnerRegistration({
+            registrant: participant,
+            category: 'mixed_doubles',
+            partnerName: assignedMixedPartner,
+            tournamentId: tournId,
+            isApproved: false
+          });
+        }
 
         imported.push({
           row: rowNum,
@@ -1080,6 +1264,25 @@ const adminAddPlayer = async (req, res, next) => {
           await participant.save();
         }
 
+        if (isDoubles && assignedDoubles) {
+          await ensurePartnerRegistration({
+            registrant: participant,
+            category: 'doubles',
+            partnerName: assignedDoubles,
+            tournamentId: tournId,
+            isApproved: false
+          });
+        }
+        if (isMixed && assignedMixed) {
+          await ensurePartnerRegistration({
+            registrant: participant,
+            category: 'mixed_doubles',
+            partnerName: assignedMixed,
+            tournamentId: tournId,
+            isApproved: false
+          });
+        }
+
         return res.json({
           success: true,
           message: `Player "${participant.fullName}" updated in pending registrations.`,
@@ -1103,6 +1306,25 @@ const adminAddPlayer = async (req, res, next) => {
         if (cleanDept && participant.department !== cleanDept) {
           participant.department = cleanDept;
           await participant.save();
+        }
+
+        if (isDoubles && assignedDoubles) {
+          await ensurePartnerRegistration({
+            registrant: participant,
+            category: 'doubles',
+            partnerName: assignedDoubles,
+            tournamentId: tournId,
+            isApproved: false
+          });
+        }
+        if (isMixed && assignedMixed) {
+          await ensurePartnerRegistration({
+            registrant: participant,
+            category: 'mixed_doubles',
+            partnerName: assignedMixed,
+            tournamentId: tournId,
+            isApproved: false
+          });
         }
 
         return res.json({
@@ -1136,6 +1358,25 @@ const adminAddPlayer = async (req, res, next) => {
       mixedDoublesPartnerName: assignedMixed,
       status: 'pending'
     });
+
+    if (isDoubles && assignedDoubles) {
+      await ensurePartnerRegistration({
+        registrant: participant,
+        category: 'doubles',
+        partnerName: assignedDoubles,
+        tournamentId: tournId,
+        isApproved: false
+      });
+    }
+    if (isMixed && assignedMixed) {
+      await ensurePartnerRegistration({
+        registrant: participant,
+        category: 'mixed_doubles',
+        partnerName: assignedMixed,
+        tournamentId: tournId,
+        isApproved: false
+      });
+    }
 
     if (req.user) {
       await AuditLog.create({

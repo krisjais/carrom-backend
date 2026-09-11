@@ -43,6 +43,108 @@ const isNameMatch = (name1, name2) => {
 };
 
 /**
+ * Ensures that a nominated partner is registered for the tournament.
+ * If the partner does not exist, creates a Participant and Registration (with participateSingles: false, isAutoCreatedPartner: true).
+ * If the partner exists but has no registration for this tournament, creates one.
+ * If the partner is already registered, ensures their participation flags and reciprocal partner names are set.
+ */
+const ensurePartnerRegistration = async ({
+  registrant,
+  category, // 'doubles' | 'mixed_doubles'
+  partnerName,
+  tournamentId,
+  isApproved = false
+}) => {
+  const cleanName = sanitizePartnerName(partnerName);
+  if (!cleanName || !registrant) return null;
+
+  // Partner cannot be the registrant themselves
+  if (registrant.fullName && cleanName.toLowerCase() === registrant.fullName.toLowerCase().trim()) {
+    return null;
+  }
+
+  // Determine partner gender
+  let partnerGender = registrant.gender;
+  if (category === 'mixed_doubles') {
+    partnerGender = registrant.gender === 'male' ? 'female' : 'male';
+  }
+
+  const escapedName = cleanName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  let partner = await Participant.findOne({
+    fullName: { $regex: new RegExp(`^${escapedName}$`, 'i') }
+  });
+
+  if (!partner) {
+    partner = await Participant.create({
+      fullName: cleanName,
+      gender: partnerGender,
+      studentId: '',
+      department: registrant.department || 'General',
+      email: '',
+      phone: '',
+      isApproved: !!isApproved
+    });
+  } else if (isApproved && !partner.isApproved) {
+    partner.isApproved = true;
+    await partner.save();
+  }
+
+  let partnerReg = await Registration.findOne({
+    participantId: partner._id,
+    tournamentId
+  });
+
+  const isDoublesEvent = category === 'doubles';
+  const isMixedEvent = category === 'mixed_doubles';
+
+  if (!partnerReg) {
+    partnerReg = await Registration.create({
+      participantId: partner._id,
+      tournamentId,
+      gender: partner.gender || partnerGender,
+      participateSingles: false,
+      participateDoubles: isDoublesEvent,
+      participateMixedDoubles: isMixedEvent,
+      doublesPartnerName: isDoublesEvent ? registrant.fullName : '',
+      mixedDoublesPartnerName: isMixedEvent ? registrant.fullName : '',
+      status: isApproved ? 'approved' : 'pending',
+      isAutoCreatedPartner: true
+    });
+  } else {
+    let modified = false;
+    if (isDoublesEvent) {
+      if (!partnerReg.participateDoubles) {
+        partnerReg.participateDoubles = true;
+        modified = true;
+      }
+      if (!partnerReg.doublesPartnerName) {
+        partnerReg.doublesPartnerName = registrant.fullName;
+        modified = true;
+      }
+    }
+    if (isMixedEvent) {
+      if (!partnerReg.participateMixedDoubles) {
+        partnerReg.participateMixedDoubles = true;
+        modified = true;
+      }
+      if (!partnerReg.mixedDoublesPartnerName) {
+        partnerReg.mixedDoublesPartnerName = registrant.fullName;
+        modified = true;
+      }
+    }
+    if (isApproved && partnerReg.status !== 'approved') {
+      partnerReg.status = 'approved';
+      modified = true;
+    }
+    if (modified) {
+      await partnerReg.save();
+    }
+  }
+
+  return { partner, registration: partnerReg };
+};
+
+/**
  * Validates a requested partner for a specific category
  */
 const validatePartnerRequest = async (
@@ -586,5 +688,6 @@ module.exports = {
   validatePartnerRequest,
   enrichRegistrationsWithValidation,
   getTournamentEntryValidationReport,
-  syncAndAutoPairTournamentEntries
+  syncAndAutoPairTournamentEntries,
+  ensurePartnerRegistration
 };

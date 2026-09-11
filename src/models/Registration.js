@@ -59,6 +59,10 @@ const registrationSchema = new mongoose.Schema(
     adminNotes: {
       type: String,
       default: ''
+    },
+    isAutoCreatedPartner: {
+      type: Boolean,
+      default: false
     }
   },
   { timestamps: true }
