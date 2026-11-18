@@ -125,7 +125,7 @@ exports.registerPlayer = async (req, res, next) => {
       });
     }
 
-    const validDepts = ['First Year', 'Second Year', 'IT Team', 'MJ Team', 'HR Team'];
+    const validDepts = ['First Year', 'Second Year', 'IT Team', 'MJ Team', 'HR Team', 'Staff'];
     if (!validDepts.includes(department)) {
       return res.status(400).json({
         success: false,

@@ -504,6 +504,7 @@ exports.bulkDeletePlayers = async (req, res, next) => {
 const normalizeDepartment = (dept) => {
   if (!dept) return 'IT Team';
   const clean = dept.toString().trim().toLowerCase();
+  if (clean.includes('staff') || clean.includes('faculty') || clean.includes('teacher') || clean.includes('prof')) return 'Staff';
   if (clean.includes('first') || clean.includes('fe') || clean.includes('1st') || clean.includes('fy')) return 'First Year';
   if (clean.includes('second') || clean.includes('se') || clean.includes('2nd') || clean.includes('sy')) return 'Second Year';
   if (clean.includes('it') || clean.includes('tech') || clean.includes('comp') || clean.includes('cs') || clean.includes('inf')) return 'IT Team';
@@ -524,7 +525,7 @@ exports.importChessPlayers = async (req, res, next) => {
     const skipped = [];
     const errors = [];
 
-    const targetDefaultStatus = 'Registered';
+    const targetDefaultStatus = (defaultStatus === 'Approved' || defaultStatus === 'approved') ? 'Approved' : 'Registered';
 
     if (isDbConnected()) {
       const existingPlayers = await ChessPlayer.find().select('email playerId');
@@ -538,7 +539,7 @@ exports.importChessPlayers = async (req, res, next) => {
         const email = (item.email || item.emailAddress || '').trim().toLowerCase();
         const rawDept = item.department || item.dept || item.branch || item.team || '';
         const phone = (item.phone || item.mobile || item.contact || '').trim();
-        const status = 'Registered';
+        const status = targetDefaultStatus;
 
         if (!fullName) {
           errors.push({ row: rowNum, reason: 'Full Name is required.' });
@@ -564,7 +565,7 @@ exports.importChessPlayers = async (req, res, next) => {
             email: finalEmail,
             phone,
             department,
-            status: 'Registered',
+            status: targetDefaultStatus,
             matchesPlayed: 0,
             wins: 0,
             draws: 0,
@@ -587,7 +588,7 @@ exports.importChessPlayers = async (req, res, next) => {
 
       return res.json({
         success: true,
-        message: `Imported ${imported.length} player(s) as Registered (Pending Approval). ${skipped.length} skipped, ${errors.length} failed.`,
+        message: `Imported ${imported.length} player(s) as ${targetDefaultStatus}. ${skipped.length} skipped, ${errors.length} failed.`,
         data: {
           importedCount: imported.length,
           skippedCount: skipped.length,
@@ -610,7 +611,7 @@ exports.importChessPlayers = async (req, res, next) => {
       const email = (item.email || item.emailAddress || '').trim().toLowerCase();
       const rawDept = item.department || item.dept || item.branch || item.team || '';
       const phone = (item.phone || item.mobile || item.contact || '').trim();
-      const status = 'Registered';
+      const status = targetDefaultStatus;
 
       if (!fullName) {
         errors.push({ row: rowNum, reason: 'Full Name is required.' });
@@ -635,7 +636,7 @@ exports.importChessPlayers = async (req, res, next) => {
         email: finalEmail,
         phone,
         department,
-        status: 'Registered',
+        status: targetDefaultStatus,
         matchesPlayed: 0,
         wins: 0,
         draws: 0,
