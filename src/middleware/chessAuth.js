@@ -1,5 +1,6 @@
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
+const connectDB = require('../config/db');
 
 const chessAdminAuth = async (req, res, next) => {
   try {
@@ -18,9 +19,15 @@ const chessAdminAuth = async (req, res, next) => {
 
     try {
       const decoded = jwt.verify(token, process.env.JWT_SECRET || 'carrom_championship_super_secure_jwt_secret_key_2026');
-      const user = await User.findById(decoded.id).select('-password');
-      if (user && user.role === 'admin') {
-        req.user = user;
+      const dbReady = await connectDB.ensureDBConnected();
+      if (dbReady) {
+        const user = await User.findById(decoded.id).select('-password');
+        if (user && user.role === 'admin') {
+          req.user = user;
+          return next();
+        }
+      } else if (decoded.role === 'admin') {
+        req.user = { _id: decoded.id, role: decoded.role, email: decoded.email };
         return next();
       }
     } catch (err) {

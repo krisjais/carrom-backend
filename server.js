@@ -71,44 +71,71 @@ app.get('/', (req, res) => {
 
 // Health check endpoint (Readiness & Liveness)
 app.get('/api/health', (req, res) => {
-  const isReady = connectDB.isDBReady ? connectDB.isDBReady() : false;
-  if (isReady) {
+  const dbStatus = connectDB.getDBStatus ? connectDB.getDBStatus() : { connected: false, state: 'unknown' };
+  if (dbStatus.connected) {
     return res.status(200).json({
       status: 'ok',
-      database: 'connected'
+      database: 'connected',
+      initialized: dbStatus.initialized
     });
   } else {
     return res.status(503).json({
       status: 'error',
-      database: 'disconnected'
+      database: dbStatus.state || 'disconnected',
+      hasRemoteUri: dbStatus.hasRemoteUri,
+      reason: dbStatus.lastError || 'Database connection pending'
     });
   }
 });
+
+// Middleware ensuring MongoDB is connected before executing Carrom DB queries
+const requireDB = async (req, res, next) => {
+  try {
+    const ready = await connectDB.ensureDBConnected();
+    if (!ready) {
+      const dbStatus = connectDB.getDBStatus ? connectDB.getDBStatus() : {};
+      return res.status(503).json({
+        success: false,
+        code: 'DB_UNAVAILABLE',
+        message: dbStatus.hasRemoteUri === false && NODE_ENV === 'production'
+          ? 'Database is not configured on the server (MONGODB_URI missing).'
+          : 'Server is waking up and connecting to the database. Please try again in a few seconds.'
+      });
+    }
+    return next();
+  } catch (err) {
+    return res.status(503).json({
+      success: false,
+      code: 'DB_UNAVAILABLE',
+      message: 'Database connection is temporarily unavailable. Please try again shortly.'
+    });
+  }
+};
 
 const chessRoutes = require('./src/routes/chessRoutes');
 const adminChessRoutes = require('./src/routes/adminChessRoutes');
 
 // Mount Routes
-app.use('/api/auth', authRoutes);
-app.use('/api/tournaments', tournamentRoutes);
-app.use('/api/registrations', registrationRoutes);
-app.use('/api/teams', teamRoutes);
-app.use('/api/draws', drawRoutes);
-app.use('/api/matches', matchRoutes);
-app.use('/api/announcements', announcementRoutes);
-app.use('/api/stats', statsRoutes);
+app.use('/api/auth', requireDB, authRoutes);
+app.use('/api/tournaments', requireDB, tournamentRoutes);
+app.use('/api/registrations', requireDB, registrationRoutes);
+app.use('/api/teams', requireDB, teamRoutes);
+app.use('/api/draws', requireDB, drawRoutes);
+app.use('/api/matches', requireDB, matchRoutes);
+app.use('/api/announcements', requireDB, announcementRoutes);
+app.use('/api/stats', requireDB, statsRoutes);
 app.use('/api/chess', chessRoutes);
 app.use('/api/admin', adminChessRoutes);
 
 // Fallback Route Mounts (in case client environment variable omitted /api)
-app.use('/auth', authRoutes);
-app.use('/tournaments', tournamentRoutes);
-app.use('/registrations', registrationRoutes);
-app.use('/teams', teamRoutes);
-app.use('/draws', drawRoutes);
-app.use('/matches', matchRoutes);
-app.use('/announcements', announcementRoutes);
-app.use('/stats', statsRoutes);
+app.use('/auth', requireDB, authRoutes);
+app.use('/tournaments', requireDB, tournamentRoutes);
+app.use('/registrations', requireDB, registrationRoutes);
+app.use('/teams', requireDB, teamRoutes);
+app.use('/draws', requireDB, drawRoutes);
+app.use('/matches', requireDB, matchRoutes);
+app.use('/announcements', requireDB, announcementRoutes);
+app.use('/stats', requireDB, statsRoutes);
 app.use('/chess', chessRoutes);
 app.use('/admin', adminChessRoutes);
 
@@ -123,51 +150,17 @@ app.use('*', (req, res) => {
 // Global Error Handler
 app.use(errorHandler);
 
-// Start HTTP server immediately on 0.0.0.0 without waiting for MongoDB
+// Start HTTP server immediately on 0.0.0.0 without blocking Render's port check
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`[Server] Listening on 0.0.0.0:${PORT}`);
   console.log(`[Server] Health check: http://localhost:${PORT}/api/health`);
 
-  // Connect to Database asynchronously
-  connectDB().then(async (conn) => {
+  // Connect to Database asynchronously (incoming requests await completion via requireDB)
+  connectDB().then((conn) => {
     if (conn) {
       console.log('[Server] Ready');
-      // Auto-ensure admin user exists in DB
-      try {
-        const User = require('./src/models/User');
-        const adminEmail = (process.env.ADMIN_EMAIL || 'admin@carrom.edu').toLowerCase().trim();
-        const adminPassword = process.env.ADMIN_PASSWORD || 'admincarrom2026';
-        let admin = await User.findOne({ email: adminEmail });
-        if (!admin) {
-          await User.create({
-            username: 'admin',
-            email: adminEmail,
-            password: adminPassword,
-            role: 'admin',
-            fullName: process.env.ADMIN_NAME || 'Tournament Director'
-          });
-          console.log(`[Server] Admin account initialized: ${adminEmail}`);
-        } else {
-          let updated = false;
-          if (admin.role !== 'admin') {
-            admin.role = 'admin';
-            updated = true;
-          }
-          const isMatch = await admin.comparePassword(adminPassword);
-          if (!isMatch) {
-            admin.password = adminPassword;
-            updated = true;
-          }
-          if (updated) {
-            await admin.save();
-            console.log(`[Server] Admin credentials synchronized: ${adminEmail}`);
-          }
-        }
-      } catch (adminErr) {
-        console.warn('[Server] Note on admin user check:', adminErr.message);
-      }
     } else {
-      console.warn('[Server] Running in degraded mode: MongoDB connection pending/failed');
+      console.warn('[Server] Running in degraded mode: MongoDB connection pending/failed (will auto-retry)');
     }
   });
 });

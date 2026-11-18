@@ -27,6 +27,19 @@ const errorHandler = (err, req, res, next) => {
     });
   }
 
+  // MongoDB disconnected / bufferCommands error -> return 503 so clients auto-retry
+  if (
+    err.name === 'MongooseServerSelectionError' ||
+    err.name === 'MongoNetworkError' ||
+    (err.message && err.message.includes('bufferCommands = false'))
+  ) {
+    return res.status(503).json({
+      success: false,
+      code: 'DB_UNAVAILABLE',
+      message: 'Database is waking up or temporarily unavailable. Please try again in a few seconds.'
+    });
+  }
+
   const statusCode = res.statusCode === 200 ? 500 : res.statusCode;
   res.status(statusCode).json({
     success: false,
