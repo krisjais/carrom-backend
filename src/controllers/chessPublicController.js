@@ -395,38 +395,55 @@ exports.getPlayerDashboard = async (req, res, next) => {
   }
 };
 
-// Update / Sync Match Dual Clock (from mobile phone tap)
+// Update / Sync Match Dual Clock (from mobile phone tap or admin)
 exports.updateMatchClock = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { activeTurn, whiteTimeRemaining, blackTimeRemaining, movesCount, status } = req.body;
+    const { activeTurn, whiteTimeRemaining, blackTimeRemaining, movesCount, isClockRunning, status } = req.body;
 
+    let match = null;
     if (isDbConnected()) {
-      const match = await ChessMatch.findById(id);
+      if (mongoose.Types.ObjectId.isValid(id)) {
+        match = await ChessMatch.findById(id);
+      }
+      if (!match) {
+        match = await ChessMatch.findOne({ matchId: id });
+      }
+      if (!match) {
+        match = await ChessMatch.findOne({ matchId: new RegExp(`^${id}$`, 'i') });
+      }
       if (!match) {
         return res.status(404).json({ success: false, message: 'Match not found.' });
       }
 
-      if (activeTurn) match.activeTurn = activeTurn;
-      if (typeof whiteTimeRemaining === 'number') match.whiteTimeRemaining = Math.max(0, whiteTimeRemaining);
-      if (typeof blackTimeRemaining === 'number') match.blackTimeRemaining = Math.max(0, blackTimeRemaining);
+      if (activeTurn !== undefined) match.activeTurn = activeTurn;
+      if (typeof whiteTimeRemaining === 'number') match.whiteTimeRemaining = Math.max(0, Math.round(whiteTimeRemaining));
+      if (typeof blackTimeRemaining === 'number') match.blackTimeRemaining = Math.max(0, Math.round(blackTimeRemaining));
       if (typeof movesCount === 'number') match.movesCount = movesCount;
+      if (typeof isClockRunning === 'boolean') match.isClockRunning = isClockRunning;
       if (status) match.status = status;
-      if (status === 'live' && !match.actualStartTime) match.actualStartTime = new Date();
+      match.lastClockUpdate = new Date();
+
+      if ((status === 'live' || isClockRunning) && !match.actualStartTime) {
+        match.actualStartTime = new Date();
+      }
 
       await match.save();
+      await match.populate('player1 player2 byePlayer');
       return res.json({ success: true, message: 'Clock synced.', data: match });
     }
 
-    const match = memoryStore.matches.find(m => m._id === id || m.matchId === id);
+    match = memoryStore.matches.find(m => m._id === id || m.matchId === id || (m.matchId && m.matchId.toLowerCase() === String(id).toLowerCase()));
     if (!match) {
       return res.status(404).json({ success: false, message: 'Match not found.' });
     }
-    if (activeTurn) match.activeTurn = activeTurn;
-    if (typeof whiteTimeRemaining === 'number') match.whiteTimeRemaining = whiteTimeRemaining;
-    if (typeof blackTimeRemaining === 'number') match.blackTimeRemaining = blackTimeRemaining;
+    if (activeTurn !== undefined) match.activeTurn = activeTurn;
+    if (typeof whiteTimeRemaining === 'number') match.whiteTimeRemaining = Math.max(0, Math.round(whiteTimeRemaining));
+    if (typeof blackTimeRemaining === 'number') match.blackTimeRemaining = Math.max(0, Math.round(blackTimeRemaining));
     if (typeof movesCount === 'number') match.movesCount = movesCount;
+    if (typeof isClockRunning === 'boolean') match.isClockRunning = isClockRunning;
     if (status) match.status = status;
+    match.lastClockUpdate = new Date();
 
     res.json({ success: true, message: 'Clock synced.', data: match });
   } catch (err) {

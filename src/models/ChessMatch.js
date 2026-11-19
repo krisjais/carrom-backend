@@ -87,6 +87,14 @@ const chessMatchSchema = new mongoose.Schema(
       type: Number,
       default: 0
     },
+    isClockRunning: {
+      type: Boolean,
+      default: false
+    },
+    lastClockUpdate: {
+      type: Date,
+      default: null
+    },
     player1Score: {
       type: Number,
       default: 0

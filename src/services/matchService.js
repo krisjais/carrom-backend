@@ -40,6 +40,9 @@ const startMatch = async (matchId) => {
     match.status = 'live';
     match.actualStartTime = new Date();
     match.durationMinutes = 10;
+    match.isClockRunning = true;
+    match.activeTurn = match.activeTurn && match.activeTurn !== 'none' ? match.activeTurn : 'white';
+    match.lastClockUpdate = new Date();
     await match.save();
 
     return await ChessMatch.findById(match._id)
@@ -52,6 +55,9 @@ const startMatch = async (matchId) => {
   match.status = 'live';
   match.actualStartTime = new Date();
   match.durationMinutes = 10;
+  match.isClockRunning = true;
+  match.activeTurn = match.activeTurn && match.activeTurn !== 'none' ? match.activeTurn : 'white';
+  match.lastClockUpdate = new Date();
   return match;
 };
 
@@ -155,6 +161,7 @@ const submitResult = async (matchId, resultData) => {
     match.resultType = resultType || 'points';
     if (notes !== undefined) match.notes = notes;
     match.status = 'completed';
+    match.isClockRunning = false;
     match.actualEndTime = new Date();
 
     await match.save();
@@ -185,6 +192,7 @@ const submitResult = async (matchId, resultData) => {
   match.resultType = resultType || 'points';
   if (notes !== undefined) match.notes = notes;
   match.status = 'completed';
+  match.isClockRunning = false;
   match.actualEndTime = new Date();
 
   await recalculateAllStandings();
@@ -203,6 +211,7 @@ const overrideResult = async (matchId, overrideData) => {
     match.resultType = resultType || 'admin_override';
     if (notes) match.notes = notes;
     match.status = 'completed';
+    match.isClockRunning = false;
     match.actualEndTime = new Date();
     match.isVerified = true;
 
@@ -218,6 +227,7 @@ const overrideResult = async (matchId, overrideData) => {
   match.resultType = resultType || 'admin_override';
   if (notes) match.notes = notes;
   match.status = 'completed';
+  match.isClockRunning = false;
   match.actualEndTime = new Date();
   match.isVerified = true;
 
