@@ -69,9 +69,10 @@ const checkMatchRestAvailability = async (tournamentId, matchDoc) => {
 };
 
 /**
- * Validates all pre-conditions before a match can be started on the Main Carrom Board
+ * Validates all pre-conditions before a match can be started on a specific Carrom Board.
+ * Supports multiple concurrent boards (Board 1, Board 2, Board 3, etc.)
  */
-const canStartMatch = async (matchId) => {
+const canStartMatch = async (matchId, targetBoardNumber = 1) => {
   const match = await Match.findById(matchId)
     .populate({ path: 'team1', populate: [{ path: 'player1' }, { path: 'player2' }] })
     .populate({ path: 'team2', populate: [{ path: 'player1' }, { path: 'player2' }] });
@@ -89,28 +90,53 @@ const canStartMatch = async (matchId) => {
   }
 
   if (match.status === 'live') {
-    return { canStart: false, reason: 'Match is already LIVE on the Main Carrom Board.' };
+    return { canStart: false, reason: `Match is already LIVE on Carrom Board #${match.carromBoardNumber || 1}.` };
   }
 
   if (!match.team1 || !match.team2) {
     return { canStart: false, reason: 'Match is WAITING: Both opponents must be determined before starting.' };
   }
 
-  // 1. Check if ANY match is currently LIVE tournament-wide
-  const liveMatch = await Match.findOne({
+  const boardNum = Number(targetBoardNumber) || match.carromBoardNumber || 1;
+
+  // 1. Check if ANY match is currently LIVE on THIS specific board
+  const liveOnBoard = await Match.findOne({
     tournamentId: match.tournamentId,
     status: 'live',
+    carromBoardNumber: boardNum,
     _id: { $ne: match._id }
   }).populate('team1').populate('team2');
 
-  if (liveMatch) {
+  if (liveOnBoard) {
     return {
       canStart: false,
-      reason: `At most 1 LIVE match is permitted tournament-wide. Main Carrom Board is currently occupied by Match #${liveMatch.matchNumber} (${liveMatch.team1?.name || 'T1'} vs ${liveMatch.team2?.name || 'T2'}). Complete the current match first.`
+      reason: `Carrom Board #${boardNum} is currently occupied by Match #${liveOnBoard.matchNumber} (${liveOnBoard.team1?.name || 'T1'} vs ${liveOnBoard.team2?.name || 'T2'}). Complete or vacate that board first, or launch on another available board.`
     };
   }
 
-  // 2. Check participant live availability
+  // 2. Check participant live conflict across ALL other active boards:
+  // A player cannot physically play on Board 1 and Board 2 at the exact same moment!
+  const startingParticipantIds = getMatchParticipantIds(match);
+  const otherLiveMatches = await Match.find({
+    tournamentId: match.tournamentId,
+    status: 'live',
+    _id: { $ne: match._id }
+  })
+    .populate({ path: 'team1', populate: [{ path: 'player1' }, { path: 'player2' }] })
+    .populate({ path: 'team2', populate: [{ path: 'player1' }, { path: 'player2' }] });
+
+  for (const lm of otherLiveMatches) {
+    const liveIds = getMatchParticipantIds(lm);
+    const overlappingId = startingParticipantIds.find((id) => liveIds.includes(id));
+    if (overlappingId) {
+      return {
+        canStart: false,
+        reason: `A contestant in this match is currently playing live on Board #${lm.carromBoardNumber || 1} (Match #${lm.matchNumber}). A player cannot participate in two concurrent matches.`
+      };
+    }
+  }
+
+  // 3. Check participant rest availability
   const restCheck = await checkMatchRestAvailability(match.tournamentId, match);
   if (!restCheck.isRested) {
     return {

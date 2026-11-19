@@ -114,6 +114,7 @@ const requireDB = async (req, res, next) => {
 
 const chessRoutes = require('./src/routes/chessRoutes');
 const adminChessRoutes = require('./src/routes/adminChessRoutes');
+const boardRoutes = require('./src/routes/boardRoutes');
 
 // Mount Routes
 app.use('/api/auth', requireDB, authRoutes);
@@ -122,6 +123,7 @@ app.use('/api/registrations', requireDB, registrationRoutes);
 app.use('/api/teams', requireDB, teamRoutes);
 app.use('/api/draws', requireDB, drawRoutes);
 app.use('/api/matches', requireDB, matchRoutes);
+app.use('/api/boards', requireDB, boardRoutes);
 app.use('/api/announcements', requireDB, announcementRoutes);
 app.use('/api/stats', requireDB, statsRoutes);
 app.use('/api/chess', chessRoutes);
@@ -134,6 +136,7 @@ app.use('/registrations', requireDB, registrationRoutes);
 app.use('/teams', requireDB, teamRoutes);
 app.use('/draws', requireDB, drawRoutes);
 app.use('/matches', requireDB, matchRoutes);
+app.use('/boards', requireDB, boardRoutes);
 app.use('/announcements', requireDB, announcementRoutes);
 app.use('/stats', requireDB, statsRoutes);
 app.use('/chess', chessRoutes);

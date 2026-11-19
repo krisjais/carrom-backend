@@ -2,6 +2,7 @@ const Match = require('../models/Match');
 const Tournament = require('../models/Tournament');
 const Team = require('../models/Team');
 const Participant = require('../models/Participant');
+const CarromBoard = require('../models/CarromBoard');
 const AuditLog = require('../models/AuditLog');
 const {
   updateMatchLiveScore,
@@ -83,8 +84,8 @@ const getLiveMatches = async (req, res, next) => {
       if (activeTourn) tournId = activeTourn._id;
     }
 
-    // At most 1 LIVE match on Main Carrom Board
-    const currentMatch = await Match.findOne({
+    // All LIVE matches across all Carrom Boards
+    const liveMatches = await Match.find({
       tournamentId: tournId,
       status: 'live'
     })
@@ -97,11 +98,42 @@ const getLiveMatches = async (req, res, next) => {
         populate: [{ path: 'player1' }, { path: 'player2' }]
       });
 
-    if (currentMatch) {
-      await checkAndClampMatchTimer(currentMatch);
+    for (const lm of liveMatches) {
+      await checkAndClampMatchTimer(lm);
     }
 
-    // READY Queue: Playable matches with known teams waiting for Main Carrom Board
+    const currentMatch = liveMatches.length > 0 ? liveMatches[0] : null;
+
+    // Fetch Carrom Boards & sync with active matches
+    let boards = await CarromBoard.find({ tournamentId: tournId }).sort({ boardNumber: 1 });
+    if (boards.length === 0) {
+      boards = await CarromBoard.insertMany([
+        {
+          tournamentId: tournId,
+          boardNumber: 1,
+          name: 'Carrom Board 1 - Main Court',
+          status: 'available',
+          assignedCategory: 'all'
+        },
+        {
+          tournamentId: tournId,
+          boardNumber: 2,
+          name: 'Carrom Board 2',
+          status: 'available',
+          assignedCategory: 'all'
+        }
+      ]);
+    }
+
+    const populatedBoards = boards.map((b) => {
+      const activeMatch = liveMatches.find((m) => (m.carromBoardNumber || 1) === b.boardNumber);
+      const bObj = b.toObject();
+      bObj.status = activeMatch ? 'live' : (b.status === 'maintenance' ? 'maintenance' : 'available');
+      bObj.currentMatch = activeMatch || null;
+      return bObj;
+    });
+
+    // READY Queue: Playable matches with known teams waiting for any Carrom Board
     const readyQueue = await Match.find({
       tournamentId: tournId,
       status: 'scheduled',
@@ -119,7 +151,7 @@ const getLiveMatches = async (req, res, next) => {
       })
       .sort({ queuePosition: 1, scheduledTime: 1 });
 
-    // Next match in line for Main Carrom Board
+    // Next match in line
     const nextMatch = readyQueue.length > 0 ? readyQueue[0] : null;
     let nextMatchReadiness = null;
     if (nextMatch) {
@@ -152,15 +184,15 @@ const getLiveMatches = async (req, res, next) => {
 
     res.json({
       success: true,
+      boards: populatedBoards,
       currentMatch,
       nextMatch,
       nextMatchReadiness,
       readyQueue,
       waitingMatchesCount,
       completedMatches: recentlyCompleted,
-      isBoardOccupied: Boolean(currentMatch),
-      // Legacy aliases for backward-compatible views
-      liveMatches: currentMatch ? [currentMatch] : [],
+      isBoardOccupied: liveMatches.length > 0,
+      liveMatches,
       upcomingMatches: readyQueue.slice(0, 8),
       recentlyCompleted
     });
@@ -207,12 +239,15 @@ const getMatchById = async (req, res, next) => {
   }
 };
 
-// Admin: Start Match on Main Carrom Board (Enforces single live match constraint & player rest)
+// Admin: Start Match on a specific Carrom Board (Supports multi-board parallel courts)
 const startMatch = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { durationMinutes, roundDurationMinutes } = req.body || {};
-    const readiness = await canStartMatch(id);
+    const { durationMinutes, roundDurationMinutes, carromBoardNumber, boardName } = req.body || {};
+    const targetBoardNumber = Number(carromBoardNumber) || 1;
+    const targetBoardName = boardName || `Carrom Board ${targetBoardNumber}`;
+
+    const readiness = await canStartMatch(id, targetBoardNumber);
 
     if (!readiness.canStart) {
       return res.status(400).json({
@@ -236,8 +271,8 @@ const startMatch = async (req, res, next) => {
 
     match.status = 'live';
     match.actualStartTime = new Date();
-    match.boardName = 'Main Carrom Board';
-    match.carromBoardNumber = 1;
+    match.boardName = targetBoardName;
+    match.carromBoardNumber = targetBoardNumber;
     match.roundDurationMinutes = configuredDuration;
     match.durationMinutes = configuredDuration;
     match.isTimerPaused = false;
@@ -245,6 +280,13 @@ const startMatch = async (req, res, next) => {
     match.timeElapsedBeforePause = 0;
     match.extraTimeMinutes = 0;
     await match.save();
+
+    // Sync CarromBoard status
+    await CarromBoard.findOneAndUpdate(
+      { tournamentId: match.tournamentId, boardNumber: targetBoardNumber },
+      { status: 'live', currentMatchId: match._id, name: targetBoardName },
+      { upsert: true, new: true }
+    );
 
     // Recalculate estimated times for remaining queue
     await recalculateEstimatedTimes(match.tournamentId);
@@ -262,14 +304,16 @@ const startMatch = async (req, res, next) => {
         team1: match.team1?.name,
         team2: match.team2?.name,
         actualStartTime: match.actualStartTime,
-        roundDurationMinutes: configuredDuration
+        roundDurationMinutes: configuredDuration,
+        carromBoardNumber: targetBoardNumber,
+        boardName: targetBoardName
       },
-      reason: `Started Match #${match.matchNumber} as LIVE on Main Carrom Board with ${configuredDuration} min round time.`
+      reason: `Started Match #${match.matchNumber} as LIVE on ${targetBoardName} (Board #${targetBoardNumber}) with ${configuredDuration} min round time.`
     });
 
     res.json({
       success: true,
-      message: `Match #${match.matchNumber} is now LIVE on Main Carrom Board (${configuredDuration} min round).`,
+      message: `Match #${match.matchNumber} is now LIVE on ${targetBoardName} (${configuredDuration} min round).`,
       match
     });
   } catch (error) {
@@ -374,6 +418,14 @@ const confirmMatch = async (req, res, next) => {
     const { id } = req.params;
     const { winnerTeamId } = req.body || {};
     const result = await confirmMatchWinner(id, req.user, winnerTeamId);
+
+    if (result.match) {
+      await CarromBoard.findOneAndUpdate(
+        { tournamentId: result.match.tournamentId, boardNumber: result.match.carromBoardNumber || 1 },
+        { status: 'available', currentMatchId: null }
+      );
+    }
+
     res.json({
       success: true,
       message: 'Match winner confirmed and advanced to bracket.',
@@ -467,6 +519,12 @@ const stopLiveMatch = async (req, res, next) => {
     match.winnerTeam = null;
 
     await match.save();
+
+    // Revert CarromBoard to available
+    await CarromBoard.findOneAndUpdate(
+      { tournamentId: match.tournamentId, boardNumber: match.carromBoardNumber || 1 },
+      { status: 'available', currentMatchId: null }
+    );
 
     // Recalculate estimated times for remaining queue
     await recalculateEstimatedTimes(match.tournamentId);
