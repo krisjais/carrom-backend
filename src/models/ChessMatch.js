@@ -70,6 +70,23 @@ const chessMatchSchema = new mongoose.Schema(
       type: Number,
       default: 10
     },
+    activeTurn: {
+      type: String,
+      enum: ['white', 'black', 'paused', 'none'],
+      default: 'white'
+    },
+    whiteTimeRemaining: {
+      type: Number,
+      default: 600 // 10 minutes in seconds
+    },
+    blackTimeRemaining: {
+      type: Number,
+      default: 600 // 10 minutes in seconds
+    },
+    movesCount: {
+      type: Number,
+      default: 0
+    },
     player1Score: {
       type: Number,
       default: 0

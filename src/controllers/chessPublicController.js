@@ -1,4 +1,6 @@
 const mongoose = require('mongoose');
+const jwt = require('jsonwebtoken');
+const bcrypt = require('bcryptjs');
 const ChessPlayer = require('../models/ChessPlayer');
 const ChessMatch = require('../models/ChessMatch');
 const ChessRound = require('../models/ChessRound');
@@ -34,15 +36,22 @@ exports.getSettings = async (req, res, next) => {
   }
 };
 
-// Player Registration API
+// Player Registration API (With Secure Password Creation)
 exports.registerPlayer = async (req, res, next) => {
   try {
-    const { fullName, email, phone, department } = req.body;
+    const { fullName, email, phone, department, password } = req.body;
 
     if (!fullName || !email || !department) {
       return res.status(400).json({
         success: false,
         message: 'Full Name, Email, and Department are required.'
+      });
+    }
+
+    if (!password || password.trim().length < 4) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please create a secure password (minimum 4 characters).'
       });
     }
 
@@ -82,6 +91,7 @@ exports.registerPlayer = async (req, res, next) => {
         playerId,
         fullName: fullName.trim(),
         email: cleanEmail,
+        password: password.trim(),
         phone: phone ? phone.trim() : '',
         department: department.trim(),
         status: 'Registered'
@@ -89,8 +99,15 @@ exports.registerPlayer = async (req, res, next) => {
 
       return res.status(201).json({
         success: true,
-        message: 'Player registered successfully. Application pending approval.',
-        data: player
+        message: 'Player registered successfully. You can now log in with your password!',
+        data: {
+          _id: player._id,
+          playerId: player.playerId,
+          fullName: player.fullName,
+          email: player.email,
+          department: player.department,
+          status: player.status
+        }
       });
     }
 
@@ -104,11 +121,15 @@ exports.registerPlayer = async (req, res, next) => {
     }
 
     const playerId = `CHS-${String(memoryStore.players.length + 1).padStart(3, '0')}`;
+    const salt = bcrypt.genSaltSync(10);
+    const hashedPassword = bcrypt.hashSync(password.trim(), salt);
+
     const player = {
       _id: `mem_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
       playerId,
       fullName: fullName.trim(),
       email: cleanEmail,
+      password: hashedPassword,
       phone: phone ? phone.trim() : '',
       department: department.trim(),
       status: 'Registered',
@@ -126,9 +147,288 @@ exports.registerPlayer = async (req, res, next) => {
 
     res.status(201).json({
       success: true,
-      message: 'Player registered successfully. Application pending approval.',
-      data: player
+      message: 'Player registered successfully. You can now log in with your password!',
+      data: {
+        _id: player._id,
+        playerId: player.playerId,
+        fullName: player.fullName,
+        email: player.email,
+        department: player.department,
+        status: player.status
+      }
     });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// Player Login API (Competitor authentication via Player ID/Email AND Password)
+exports.playerLogin = async (req, res, next) => {
+  try {
+    const { identifier, email, playerId, phone, password } = req.body;
+    const rawInput = identifier || email || playerId || phone || '';
+    if (!rawInput.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please provide your Player ID (e.g. CHS-001) or registered Email.'
+      });
+    }
+
+    if (!password || !password.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please enter your account password.'
+      });
+    }
+
+    const clean = rawInput.trim();
+    const cleanLower = clean.toLowerCase();
+
+    let player = null;
+    if (isDbConnected()) {
+      // Find by exact Player ID (case-insensitive) OR Email OR Phone
+      player = await ChessPlayer.findOne({
+        $or: [
+          { playerId: { $regex: new RegExp(`^${clean.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') } },
+          { email: cleanLower },
+          { phone: clean }
+        ]
+      });
+    } else {
+      player = memoryStore.players.find(
+        p => (p.playerId && p.playerId.toLowerCase() === cleanLower) ||
+             (p.email && p.email.toLowerCase() === cleanLower) ||
+             (p.phone && p.phone === clean)
+      );
+    }
+
+    if (!player) {
+      return res.status(404).json({
+        success: false,
+        message: `No competitor profile found matching "${clean}". Please check your Player ID or register first.`
+      });
+    }
+
+    // Verify password if player has one
+    if (player.password) {
+      const isMatch = typeof player.comparePassword === 'function'
+        ? await player.comparePassword(password.trim())
+        : await bcrypt.compare(password.trim(), player.password);
+
+      if (!isMatch) {
+        return res.status(401).json({
+          success: false,
+          message: 'Incorrect password. Please verify your credentials and try again.'
+        });
+      }
+    }
+
+    const token = jwt.sign(
+      {
+        id: player._id || player.playerId,
+        playerId: player.playerId,
+        fullName: player.fullName,
+        email: player.email,
+        role: 'chess_player'
+      },
+      process.env.JWT_SECRET || 'carrom_championship_super_secure_jwt_secret_key_2026',
+      { expiresIn: '30d' }
+    );
+
+    // Fetch this player's active and upcoming matches
+    const playerIdStr = (player._id || player.playerId).toString();
+    let currentMatch = null;
+    let matchHistory = [];
+
+    if (isDbConnected()) {
+      const allMatches = await ChessMatch.find({
+        $or: [
+          { player1: player._id },
+          { player2: player._id },
+          { byePlayer: player._id }
+        ]
+      })
+        .populate('player1', 'fullName playerId department rank')
+        .populate('player2', 'fullName playerId department rank')
+        .populate('byePlayer', 'fullName playerId department')
+        .populate('winnerPlayer', 'fullName playerId department')
+        .sort({ round: -1, createdAt: -1 });
+
+      currentMatch =
+        allMatches.find(m => m.status === 'live') ||
+        allMatches.find(m => m.status === 'scheduled') ||
+        allMatches[0] ||
+        null;
+      matchHistory = allMatches;
+    } else {
+      const allMatches = memoryStore.matches.filter(m => {
+        const p1Id = (m.player1?._id || m.player1 || m.byePlayer?._id || m.byePlayer)?.toString();
+        const p2Id = (m.player2?._id || m.player2)?.toString();
+        return p1Id === playerIdStr || p2Id === playerIdStr;
+      });
+      currentMatch =
+        allMatches.find(m => m.status === 'live') ||
+        allMatches.find(m => m.status === 'scheduled') ||
+        allMatches[0] ||
+        null;
+      matchHistory = allMatches;
+    }
+
+    // Determine player's piece color in their current match
+    let pieceColor = 'spectator';
+    if (currentMatch) {
+      const p1Id = (currentMatch.player1?._id || currentMatch.player1 || currentMatch.byePlayer?._id || currentMatch.byePlayer)?.toString();
+      const p2Id = (currentMatch.player2?._id || currentMatch.player2)?.toString();
+      if (p1Id === playerIdStr) pieceColor = 'white';
+      else if (p2Id === playerIdStr) pieceColor = 'black';
+    }
+
+    res.json({
+      success: true,
+      message: `Welcome back, ${player.fullName}!`,
+      token,
+      data: {
+        player,
+        pieceColor,
+        currentMatch,
+        matchHistory
+      }
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// Get Full Player Dashboard (Current match, dual clock state, standings)
+exports.getPlayerDashboard = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    if (!id) {
+      return res.status(400).json({ success: false, message: 'Player identifier is required.' });
+    }
+
+    const clean = id.trim();
+    const cleanLower = clean.toLowerCase();
+
+    let player = null;
+    if (isDbConnected()) {
+      if (mongoose.Types.ObjectId.isValid(clean)) {
+        player = await ChessPlayer.findById(clean);
+      }
+      if (!player) {
+        player = await ChessPlayer.findOne({
+          $or: [
+            { playerId: { $regex: new RegExp(`^${clean.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') } },
+            { email: cleanLower }
+          ]
+        });
+      }
+    } else {
+      player = memoryStore.players.find(
+        p => (p._id && p._id.toString() === clean) ||
+             (p.playerId && p.playerId.toLowerCase() === cleanLower) ||
+             (p.email && p.email.toLowerCase() === cleanLower)
+      );
+    }
+
+    if (!player) {
+      return res.status(404).json({ success: false, message: 'Player not found.' });
+    }
+
+    const playerIdStr = (player._id || player.playerId).toString();
+    let currentMatch = null;
+    let matchHistory = [];
+
+    if (isDbConnected()) {
+      const allMatches = await ChessMatch.find({
+        $or: [
+          { player1: player._id },
+          { player2: player._id },
+          { byePlayer: player._id }
+        ]
+      })
+        .populate('player1', 'fullName playerId department rank')
+        .populate('player2', 'fullName playerId department rank')
+        .populate('byePlayer', 'fullName playerId department')
+        .populate('winnerPlayer', 'fullName playerId department')
+        .sort({ round: -1, createdAt: -1 });
+
+      currentMatch =
+        allMatches.find(m => m.status === 'live') ||
+        allMatches.find(m => m.status === 'scheduled') ||
+        allMatches[0] ||
+        null;
+      matchHistory = allMatches;
+    } else {
+      const allMatches = memoryStore.matches.filter(m => {
+        const p1Id = (m.player1?._id || m.player1 || m.byePlayer?._id || m.byePlayer)?.toString();
+        const p2Id = (m.player2?._id || m.player2)?.toString();
+        return p1Id === playerIdStr || p2Id === playerIdStr;
+      });
+      currentMatch =
+        allMatches.find(m => m.status === 'live') ||
+        allMatches.find(m => m.status === 'scheduled') ||
+        allMatches[0] ||
+        null;
+      matchHistory = allMatches;
+    }
+
+    let pieceColor = 'spectator';
+    if (currentMatch) {
+      const p1Id = (currentMatch.player1?._id || currentMatch.player1 || currentMatch.byePlayer?._id || currentMatch.byePlayer)?.toString();
+      const p2Id = (currentMatch.player2?._id || currentMatch.player2)?.toString();
+      if (p1Id === playerIdStr) pieceColor = 'white';
+      else if (p2Id === playerIdStr) pieceColor = 'black';
+    }
+
+    res.json({
+      success: true,
+      data: {
+        player,
+        pieceColor,
+        currentMatch,
+        matchHistory
+      }
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// Update / Sync Match Dual Clock (from mobile phone tap)
+exports.updateMatchClock = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { activeTurn, whiteTimeRemaining, blackTimeRemaining, movesCount, status } = req.body;
+
+    if (isDbConnected()) {
+      const match = await ChessMatch.findById(id);
+      if (!match) {
+        return res.status(404).json({ success: false, message: 'Match not found.' });
+      }
+
+      if (activeTurn) match.activeTurn = activeTurn;
+      if (typeof whiteTimeRemaining === 'number') match.whiteTimeRemaining = Math.max(0, whiteTimeRemaining);
+      if (typeof blackTimeRemaining === 'number') match.blackTimeRemaining = Math.max(0, blackTimeRemaining);
+      if (typeof movesCount === 'number') match.movesCount = movesCount;
+      if (status) match.status = status;
+      if (status === 'live' && !match.actualStartTime) match.actualStartTime = new Date();
+
+      await match.save();
+      return res.json({ success: true, message: 'Clock synced.', data: match });
+    }
+
+    const match = memoryStore.matches.find(m => m._id === id || m.matchId === id);
+    if (!match) {
+      return res.status(404).json({ success: false, message: 'Match not found.' });
+    }
+    if (activeTurn) match.activeTurn = activeTurn;
+    if (typeof whiteTimeRemaining === 'number') match.whiteTimeRemaining = whiteTimeRemaining;
+    if (typeof blackTimeRemaining === 'number') match.blackTimeRemaining = blackTimeRemaining;
+    if (typeof movesCount === 'number') match.movesCount = movesCount;
+    if (status) match.status = status;
+
+    res.json({ success: true, message: 'Clock synced.', data: match });
   } catch (err) {
     next(err);
   }

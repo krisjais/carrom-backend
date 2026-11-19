@@ -6,10 +6,14 @@ const { adminLogin } = require('../controllers/chessController');
 const { chessAdminAuth } = require('../middleware/chessAuth');
 
 // -------------------------------------------------------------
-// PUBLIC APIS
+// PUBLIC APIS & PLAYER AUTH
 // -------------------------------------------------------------
 router.get('/settings', publicCtrl.getSettings);
 router.post('/register', publicCtrl.registerPlayer);
+router.post('/player/login', publicCtrl.playerLogin);
+router.get('/player/dashboard/:id', publicCtrl.getPlayerDashboard);
+router.post('/matches/:id/clock', publicCtrl.updateMatchClock);
+router.put('/matches/:id/clock', publicCtrl.updateMatchClock);
 router.get('/players', publicCtrl.getPlayers);
 router.get('/players/:id', publicCtrl.getPlayerById);
 router.get('/matches', publicCtrl.getMatches);
