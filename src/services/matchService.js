@@ -167,6 +167,14 @@ const submitResult = async (matchId, resultData) => {
     match.resultType = resultType || 'points';
     if (notes !== undefined) match.notes = notes;
     match.status = 'completed';
+    if (match.isClockRunning && match.lastClockUpdate) {
+      const elapsed = Math.max(0, Math.floor((Date.now() - new Date(match.lastClockUpdate).getTime()) / 1000));
+      if (match.activeTurn === 'white' && typeof match.whiteTimeRemaining === 'number') {
+        match.whiteTimeRemaining = Math.max(0, match.whiteTimeRemaining - elapsed);
+      } else if (match.activeTurn === 'black' && typeof match.blackTimeRemaining === 'number') {
+        match.blackTimeRemaining = Math.max(0, match.blackTimeRemaining - elapsed);
+      }
+    }
     match.isClockRunning = false;
     match.actualEndTime = new Date();
 
@@ -217,6 +225,14 @@ const overrideResult = async (matchId, overrideData) => {
     match.resultType = resultType || 'admin_override';
     if (notes) match.notes = notes;
     match.status = 'completed';
+    if (match.isClockRunning && match.lastClockUpdate) {
+      const elapsed = Math.max(0, Math.floor((Date.now() - new Date(match.lastClockUpdate).getTime()) / 1000));
+      if (match.activeTurn === 'white' && typeof match.whiteTimeRemaining === 'number') {
+        match.whiteTimeRemaining = Math.max(0, match.whiteTimeRemaining - elapsed);
+      } else if (match.activeTurn === 'black' && typeof match.blackTimeRemaining === 'number') {
+        match.blackTimeRemaining = Math.max(0, match.blackTimeRemaining - elapsed);
+      }
+    }
     match.isClockRunning = false;
     match.actualEndTime = new Date();
     match.isVerified = true;
