@@ -41,7 +41,10 @@ const startMatch = async (matchId) => {
     match.actualStartTime = new Date();
     match.durationMinutes = 10;
     match.isClockRunning = true;
-    match.activeTurn = match.activeTurn && match.activeTurn !== 'none' ? match.activeTurn : 'white';
+    match.activeTurn = 'white'; // Opening turn always belongs to White
+    match.whiteTimeRemaining = typeof match.whiteTimeRemaining === 'number' && match.whiteTimeRemaining > 0 ? match.whiteTimeRemaining : 600;
+    match.blackTimeRemaining = typeof match.blackTimeRemaining === 'number' && match.blackTimeRemaining > 0 ? match.blackTimeRemaining : 600;
+    match.movesCount = match.movesCount || 0;
     match.lastClockUpdate = new Date();
     await match.save();
 
@@ -56,7 +59,10 @@ const startMatch = async (matchId) => {
   match.actualStartTime = new Date();
   match.durationMinutes = 10;
   match.isClockRunning = true;
-  match.activeTurn = match.activeTurn && match.activeTurn !== 'none' ? match.activeTurn : 'white';
+  match.activeTurn = 'white'; // Opening turn always belongs to White
+  match.whiteTimeRemaining = typeof match.whiteTimeRemaining === 'number' && match.whiteTimeRemaining > 0 ? match.whiteTimeRemaining : 600;
+  match.blackTimeRemaining = typeof match.blackTimeRemaining === 'number' && match.blackTimeRemaining > 0 ? match.blackTimeRemaining : 600;
+  match.movesCount = match.movesCount || 0;
   match.lastClockUpdate = new Date();
   return match;
 };

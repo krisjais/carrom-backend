@@ -526,6 +526,13 @@ exports.startMatch = async (req, res, next) => {
 
     match.status = 'live';
     match.actualStartTime = new Date();
+    match.durationMinutes = 10;
+    match.isClockRunning = true;
+    match.activeTurn = 'white'; // Always start opening move from White
+    match.whiteTimeRemaining = typeof match.whiteTimeRemaining === 'number' && match.whiteTimeRemaining > 0 ? match.whiteTimeRemaining : 600;
+    match.blackTimeRemaining = typeof match.blackTimeRemaining === 'number' && match.blackTimeRemaining > 0 ? match.blackTimeRemaining : 600;
+    match.movesCount = match.movesCount || 0;
+    match.lastClockUpdate = new Date();
     await match.save();
 
     res.json({
