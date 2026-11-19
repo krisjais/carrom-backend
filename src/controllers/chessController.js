@@ -504,6 +504,35 @@ exports.generateMatches = async (req, res, next) => {
         });
 
         createdMatches.push(newMatch);
+      } else {
+        // Odd player out -> Automatic BYE
+        const p1 = players[i];
+        const matchId = `CHS-M${String(mCounter).padStart(3, '0')}`;
+        mCounter++;
+
+        const byeMatch = await ChessMatch.create({
+          matchId,
+          round,
+          player1: p1._id,
+          byePlayer: p1._id,
+          winnerPlayer: p1._id,
+          winner: 'player1',
+          isBye: true,
+          status: 'completed',
+          resultType: 'bye',
+          actualStartTime: new Date(),
+          actualEndTime: new Date(),
+          durationMinutes: settings.matchDuration || 10,
+          notes: `Automatic BYE awarded for Round ${round} (odd player count).`
+        });
+
+        p1.byes = (p1.byes || 0) + 1;
+        p1.tournamentPoints = (p1.tournamentPoints || 0) + 3;
+        p1.wins = (p1.wins || 0) + 1;
+        p1.matchesPlayed = (p1.matchesPlayed || 0) + 1;
+        await p1.save();
+
+        createdMatches.push(byeMatch);
       }
     }
 

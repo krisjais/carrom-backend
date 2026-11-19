@@ -141,18 +141,18 @@ const generateRoundPairings = async (roundNumber = null, roundName = null) => {
   const createdMatches = [];
   let mCounter = (isDbConnected ? await ChessMatch.countDocuments() : memoryStore.matches.length) + 1;
 
-  // 3. Odd Number of Players: Check MATERIAL POINTS to select the player who skips this round (BYE)
+  // 3. Odd Number of Players: Award an Automatic BYE to advance to next round
   if (playerPool.length % 2 !== 0) {
-    // Sort candidates primarily by MATERIAL POINTS descending so player with highest material score skips the round
+    // Sort candidates primarily by Tournament Points, Wins, then Seed/Rank
     const candidates = [...playerPool].sort((a, b) => {
-      const matDiff = (b.materialPoints || 0) - (a.materialPoints || 0);
-      if (matDiff !== 0) return matDiff;
       const ptDiff = (b.tournamentPoints || 0) - (a.tournamentPoints || 0);
       if (ptDiff !== 0) return ptDiff;
-      return (b.wins || 0) - (a.wins || 0);
+      const winDiff = (b.wins || 0) - (a.wins || 0);
+      if (winDiff !== 0) return winDiff;
+      return (a.rank || 9999) - (b.rank || 9999);
     });
 
-    // Find the player with highest material points who has not yet received a bye
+    // Find the player who has not yet received a BYE in previous rounds
     let selectedCandidate = null;
     for (let i = 0; i < candidates.length; i++) {
       const p = candidates[i];
@@ -164,7 +164,7 @@ const generateRoundPairings = async (roundNumber = null, roundName = null) => {
       }
     }
 
-    // If all remaining candidates already had a bye, pick the one with highest material points
+    // If all remaining candidates already had a bye, pick top seed
     if (!selectedCandidate) {
       selectedCandidate = candidates[0];
     }
@@ -186,7 +186,7 @@ const generateRoundPairings = async (roundNumber = null, roundName = null) => {
       durationMinutes: config.matchDuration || 10,
       actualStartTime: new Date(),
       actualEndTime: new Date(),
-      notes: `Automatic BYE awarded for ${customRoundName} based on highest material rating (${byePlayer.materialPoints || 0} pts) - player skips this round.`
+      notes: `Automatic BYE awarded for ${customRoundName} (odd player count) - player automatically advances to the next round with +3 points.`
     };
 
     let byeMatch;
