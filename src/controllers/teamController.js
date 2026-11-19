@@ -301,9 +301,119 @@ const autoPopulateTeams = async (req, res, next) => {
   }
 };
 
+// Admin: Update a team's name, partner, or players
+const updateTeam = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const {
+      name,
+      player1Id,
+      player2Id,
+      rawPartnerName,
+      customPartnerName,
+      replacePlayerId,
+      newParticipantId,
+      reason
+    } = req.body;
+
+    const team = await Team.findById(id).populate('player1').populate('player2');
+    if (!team) {
+      return res.status(404).json({ success: false, message: 'Team not found.' });
+    }
+
+    const oldName = team.name;
+
+    // Handle replacePlayerId (swap specific player slot)
+    if (replacePlayerId && newParticipantId) {
+      const newP = await Participant.findById(newParticipantId);
+      if (!newP) {
+        return res.status(404).json({ success: false, message: 'Replacement participant not found.' });
+      }
+      if (team.player1 && team.player1._id.toString() === replacePlayerId.toString()) {
+        team.player1 = newP._id;
+      } else if (team.player2 && team.player2._id.toString() === replacePlayerId.toString()) {
+        team.player2 = newP._id;
+      } else {
+        // default to replacing partner (player2)
+        team.player2 = newP._id;
+      }
+    } else if (newParticipantId) {
+      // Replaces partner (player2) by default
+      const newP = await Participant.findById(newParticipantId);
+      if (!newP) {
+        return res.status(404).json({ success: false, message: 'Replacement participant not found.' });
+      }
+      team.player2 = newP._id;
+    }
+
+    if (player1Id) {
+      const p1 = await Participant.findById(player1Id);
+      if (p1) team.player1 = p1._id;
+    }
+
+    if (player2Id !== undefined) {
+      if (player2Id) {
+        const p2 = await Participant.findById(player2Id);
+        if (p2) team.player2 = p2._id;
+      } else {
+        team.player2 = null;
+      }
+    }
+
+    if (rawPartnerName !== undefined || customPartnerName !== undefined) {
+      team.rawPartnerName = (customPartnerName || rawPartnerName || '').trim();
+    }
+
+    // Determine final team name
+    if (name && name.trim()) {
+      team.name = name.trim();
+    } else {
+      await team.populate('player1');
+      await team.populate('player2');
+      if (team.player1 && team.player2) {
+        team.name = `${team.player1.fullName} & ${team.player2.fullName}`;
+      } else if (team.player1 && team.rawPartnerName) {
+        team.name = `${team.player1.fullName} & ${team.rawPartnerName}`;
+      } else if (team.player1) {
+        team.name = team.player1.fullName;
+      }
+    }
+
+    await team.save();
+
+    if (req.user) {
+      await AuditLog.create({
+        action: 'UPDATE_TEAM',
+        performedBy: req.user._id,
+        performedByName: req.user.fullName,
+        entityType: 'Team',
+        entityId: team._id.toString(),
+        details: {
+          category: team.category,
+          oldName,
+          newName: team.name,
+          rawPartnerName: team.rawPartnerName
+        },
+        reason: reason || `Admin updated team/substituted partner: "${oldName}" -> "${team.name}"`
+      });
+    }
+
+    const updatedTeam = await Team.findById(team._id).populate('player1').populate('player2');
+
+    res.json({
+      success: true,
+      message: `Team updated successfully to "${updatedTeam.name}".`,
+      team: updatedTeam
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   getTeams,
   createDoublesPair,
+  updateTeam,
   deleteTeam,
   deleteAllTeams,
   autoPopulateTeams

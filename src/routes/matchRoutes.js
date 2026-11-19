@@ -10,7 +10,8 @@ const {
   updateScore,
   confirmMatch,
   correctMatch,
-  scheduleMatch
+  scheduleMatch,
+  substituteMatchPartner
 } = require('../controllers/matchController');
 const { authRequired, adminOnly } = require('../middleware/auth');
 
@@ -24,6 +25,8 @@ router.put('/:id/score', authRequired, adminOnly, updateScore);
 router.post('/:id/confirm', authRequired, adminOnly, confirmMatch);
 router.post('/:id/correct', authRequired, adminOnly, correctMatch);
 router.put('/:id/schedule', authRequired, adminOnly, scheduleMatch);
+router.put('/:id/substitute', authRequired, adminOnly, substituteMatchPartner);
+router.post('/:id/substitute', authRequired, adminOnly, substituteMatchPartner);
 
 module.exports = router;
 

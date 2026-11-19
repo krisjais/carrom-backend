@@ -1,5 +1,7 @@
 const Match = require('../models/Match');
 const Tournament = require('../models/Tournament');
+const Team = require('../models/Team');
+const Participant = require('../models/Participant');
 const AuditLog = require('../models/AuditLog');
 const {
   updateMatchLiveScore,
@@ -495,6 +497,158 @@ const stopLiveMatch = async (req, res, next) => {
   }
 };
 
+// Admin: Substitute player/partner or update team name in a match
+const substituteMatchPartner = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const {
+      slot, // 'team1' | 'team2'
+      teamId, // Optional: swap with an entirely different Team document
+      newName, // Optional: custom team name
+      newPartnerName, // Optional: custom partner string
+      newParticipantId, // Optional: replacement participant ObjectId
+      targetPlayerSlot, // Optional: 'player1' or 'player2'
+      reason
+    } = req.body;
+
+    if (!slot || (slot !== 'team1' && slot !== 'team2')) {
+      return res.status(400).json({ success: false, message: 'Slot must be "team1" or "team2".' });
+    }
+
+    const match = await Match.findById(id);
+    if (!match) {
+      return res.status(404).json({ success: false, message: 'Match not found.' });
+    }
+
+    let affectedTeamName = '';
+
+    // Option 1: Reassign slot to a completely different approved Team
+    if (teamId) {
+      const targetTeam = await Team.findById(teamId);
+      if (!targetTeam) {
+        return res.status(404).json({ success: false, message: 'Replacement team not found.' });
+      }
+
+      const oldTeamId = match[slot];
+      match[slot] = targetTeam._id;
+
+      // If match was completed and winner was old team, update winner reference
+      if (match.status === 'completed' && match.winnerTeam && oldTeamId && match.winnerTeam.toString() === oldTeamId.toString()) {
+        match.winnerTeam = targetTeam._id;
+        if (match.nextMatchId && match.nextMatchSlot) {
+          await Match.findByIdAndUpdate(match.nextMatchId, { [match.nextMatchSlot]: targetTeam._id });
+        }
+      }
+
+      await match.save();
+      affectedTeamName = targetTeam.name;
+
+      if (req.user) {
+        await AuditLog.create({
+          action: 'SUBSTITUTE_MATCH_TEAM',
+          performedBy: req.user._id,
+          performedByName: req.user.fullName || 'Admin',
+          entityType: 'Match',
+          entityId: match._id.toString(),
+          details: { matchNumber: match.matchNumber, slot, newTeam: targetTeam.name },
+          reason: reason || `Admin reassigned Match #${match.matchNumber} ${slot} to team ${targetTeam.name}`
+        });
+      }
+    } else {
+      // Option 2: Update the partner/player/name on the existing Team document
+      const currentTeamId = match[slot];
+      if (!currentTeamId) {
+        return res.status(400).json({ success: false, message: `No team is currently assigned to ${slot} in this match.` });
+      }
+
+      const team = await Team.findById(currentTeamId).populate('player1').populate('player2');
+      if (!team) {
+        return res.status(404).json({ success: false, message: 'Team record not found.' });
+      }
+
+      const oldTeamName = team.name;
+
+      // If replacing with another registered participant
+      if (newParticipantId) {
+        const replacement = await Participant.findById(newParticipantId);
+        if (!replacement) {
+          return res.status(404).json({ success: false, message: 'Replacement participant not found.' });
+        }
+
+        const isSingles = team.category.includes('singles');
+        if (isSingles || targetPlayerSlot === 'player1') {
+          team.player1 = replacement._id;
+        } else {
+          // Doubles / Mixed doubles partner (player2)
+          team.player2 = replacement._id;
+        }
+      }
+
+      if (newPartnerName !== undefined) {
+        team.rawPartnerName = (newPartnerName || '').trim();
+      }
+
+      // Final display name update
+      if (newName && newName.trim()) {
+        team.name = newName.trim();
+      } else {
+        await team.populate('player1');
+        await team.populate('player2');
+        if (team.player1 && team.player2) {
+          team.name = `${team.player1.fullName} & ${team.player2.fullName}`;
+        } else if (team.player1 && team.rawPartnerName) {
+          team.name = `${team.player1.fullName} & ${team.rawPartnerName}`;
+        } else if (team.player1) {
+          team.name = team.player1.fullName;
+        }
+      }
+
+      await team.save();
+      affectedTeamName = team.name;
+
+      if (req.user) {
+        await AuditLog.create({
+          action: 'SUBSTITUTE_MATCH_PARTNER',
+          performedBy: req.user._id,
+          performedByName: req.user.fullName || 'Admin',
+          entityType: 'Match',
+          entityId: match._id.toString(),
+          details: {
+            matchNumber: match.matchNumber,
+            slot,
+            oldName: oldTeamName,
+            newName: team.name,
+            rawPartnerName: team.rawPartnerName
+          },
+          reason: reason || `Admin substituted partner for Match #${match.matchNumber} (${slot}): "${oldTeamName}" -> "${team.name}"`
+        });
+      }
+    }
+
+    const populatedMatch = await Match.findById(id)
+      .populate({
+        path: 'team1',
+        populate: [{ path: 'player1' }, { path: 'player2' }]
+      })
+      .populate({
+        path: 'team2',
+        populate: [{ path: 'player1' }, { path: 'player2' }]
+      })
+      .populate({
+        path: 'winnerTeam',
+        populate: [{ path: 'player1' }, { path: 'player2' }]
+      });
+
+    res.json({
+      success: true,
+      message: `Match #${match.matchNumber} updated successfully! Active name: "${affectedTeamName}"`,
+      match: populatedMatch
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   getMatches,
   getLiveMatches,
@@ -505,6 +659,7 @@ module.exports = {
   updateScore,
   confirmMatch,
   correctMatch,
-  scheduleMatch
+  scheduleMatch,
+  substituteMatchPartner
 };
 
