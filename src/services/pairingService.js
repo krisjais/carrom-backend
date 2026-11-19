@@ -82,14 +82,18 @@ const generateRoundPairings = async (roundNumber = null, roundName = null) => {
 
   let playerPool = [...eligiblePlayers];
 
-  // 2. Knockout rule: If previous round matches exist, require them to be completed and advance winners
-  if (targetRound > 1) {
-    const prevRoundMatches = pastMatches.filter(m => m.round === targetRound - 1);
-    if (prevRoundMatches.length > 0) {
-      const uncompleted = prevRoundMatches.filter(m => m.status !== 'completed');
-      if (uncompleted.length > 0) {
-        throw new Error(`Round ${targetRound - 1} has ${uncompleted.length} uncompleted match(es). Please complete all matches in the previous round before generating ${customRoundName}.`);
-      }
+  // 2. Knockout rule: If previous round matches exist, require them to be completed and advance winners & BYEs
+  if (pastMatches.length > 0) {
+    const previousRounds = pastMatches.map(m => m.round).filter(r => r < targetRound);
+    const lastRoundNumber = previousRounds.length > 0 ? Math.max(...previousRounds) : (targetRound > 1 ? targetRound - 1 : null);
+    
+    if (lastRoundNumber) {
+      const prevRoundMatches = pastMatches.filter(m => m.round === lastRoundNumber);
+      if (prevRoundMatches.length > 0) {
+        const uncompleted = prevRoundMatches.filter(m => m.status !== 'completed');
+        if (uncompleted.length > 0) {
+          throw new Error(`Previous round (Round ${lastRoundNumber}) has ${uncompleted.length} uncompleted match(es). Please complete all matches in the previous round before generating ${customRoundName}.`);
+        }
 
       const advancingPlayerIds = new Set();
       prevRoundMatches.forEach(m => {
@@ -125,6 +129,7 @@ const generateRoundPairings = async (roundNumber = null, roundName = null) => {
       }
     }
   }
+}
 
   // Sort remaining pool
   playerPool.sort((a, b) => {
