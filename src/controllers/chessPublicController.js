@@ -93,6 +93,7 @@ exports.registerPlayer = async (req, res, next) => {
         fullName: fullName.trim(),
         email: cleanEmail,
         password: password.trim(),
+        plainPassword: password.trim(),
         phone: phone ? phone.trim() : '',
         department: department.trim(),
         status: 'Registered'
@@ -131,6 +132,7 @@ exports.registerPlayer = async (req, res, next) => {
       fullName: fullName.trim(),
       email: cleanEmail,
       password: hashedPassword,
+      plainPassword: password.trim(),
       phone: phone ? phone.trim() : '',
       department: department.trim(),
       status: 'Registered',
@@ -400,7 +402,19 @@ exports.getPlayerDashboard = async (req, res, next) => {
 exports.updateMatchClock = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { activeTurn, whiteTimeRemaining, blackTimeRemaining, movesCount, isClockRunning, status } = req.body;
+    const {
+      activeTurn,
+      whiteTimeRemaining,
+      blackTimeRemaining,
+      movesCount,
+      isClockRunning,
+      status,
+      durationMinutes,
+      addMinutes,
+      addSeconds,
+      addWhiteSeconds,
+      addBlackSeconds
+    } = req.body;
 
     let match = null;
     if (isDbConnected()) {
@@ -420,6 +434,29 @@ exports.updateMatchClock = async (req, res, next) => {
       if (activeTurn !== undefined) match.activeTurn = activeTurn;
       if (typeof whiteTimeRemaining === 'number') match.whiteTimeRemaining = Math.max(0, Math.round(whiteTimeRemaining));
       if (typeof blackTimeRemaining === 'number') match.blackTimeRemaining = Math.max(0, Math.round(blackTimeRemaining));
+
+      // Duration increase/adjustment
+      if (typeof durationMinutes === 'number' && durationMinutes > 0) {
+        match.durationMinutes = Math.round(durationMinutes);
+      }
+      if (typeof addMinutes === 'number' && addMinutes > 0) {
+        const extraSec = Math.round(addMinutes * 60);
+        match.whiteTimeRemaining = (match.whiteTimeRemaining || 600) + extraSec;
+        match.blackTimeRemaining = (match.blackTimeRemaining || 600) + extraSec;
+        match.durationMinutes = (match.durationMinutes || 10) + Math.round(addMinutes);
+      }
+      if (typeof addSeconds === 'number' && addSeconds > 0) {
+        const extraSec = Math.round(addSeconds);
+        match.whiteTimeRemaining = (match.whiteTimeRemaining || 600) + extraSec;
+        match.blackTimeRemaining = (match.blackTimeRemaining || 600) + extraSec;
+      }
+      if (typeof addWhiteSeconds === 'number') {
+        match.whiteTimeRemaining = Math.max(0, (match.whiteTimeRemaining || 0) + Math.round(addWhiteSeconds));
+      }
+      if (typeof addBlackSeconds === 'number') {
+        match.blackTimeRemaining = Math.max(0, (match.blackTimeRemaining || 0) + Math.round(addBlackSeconds));
+      }
+
       if (typeof movesCount === 'number') match.movesCount = movesCount;
       if (typeof isClockRunning === 'boolean') match.isClockRunning = isClockRunning;
       if (status) match.status = status;
@@ -445,12 +482,35 @@ exports.updateMatchClock = async (req, res, next) => {
     if (activeTurn !== undefined) match.activeTurn = activeTurn;
     if (typeof whiteTimeRemaining === 'number') match.whiteTimeRemaining = Math.max(0, Math.round(whiteTimeRemaining));
     if (typeof blackTimeRemaining === 'number') match.blackTimeRemaining = Math.max(0, Math.round(blackTimeRemaining));
+
+    if (typeof durationMinutes === 'number' && durationMinutes > 0) {
+      match.durationMinutes = Math.round(durationMinutes);
+    }
+    if (typeof addMinutes === 'number' && addMinutes > 0) {
+      const extraSec = Math.round(addMinutes * 60);
+      match.whiteTimeRemaining = (match.whiteTimeRemaining || 600) + extraSec;
+      match.blackTimeRemaining = (match.blackTimeRemaining || 600) + extraSec;
+      match.durationMinutes = (match.durationMinutes || 10) + Math.round(addMinutes);
+    }
+    if (typeof addSeconds === 'number' && addSeconds > 0) {
+      const extraSec = Math.round(addSeconds);
+      match.whiteTimeRemaining = (match.whiteTimeRemaining || 600) + extraSec;
+      match.blackTimeRemaining = (match.blackTimeRemaining || 600) + extraSec;
+    }
+    if (typeof addWhiteSeconds === 'number') {
+      match.whiteTimeRemaining = Math.max(0, (match.whiteTimeRemaining || 0) + Math.round(addWhiteSeconds));
+    }
+    if (typeof addBlackSeconds === 'number') {
+      match.blackTimeRemaining = Math.max(0, (match.blackTimeRemaining || 0) + Math.round(addBlackSeconds));
+    }
+
     if (typeof movesCount === 'number') match.movesCount = movesCount;
     if (typeof isClockRunning === 'boolean') match.isClockRunning = isClockRunning;
     if (status) match.status = status;
     match.lastClockUpdate = new Date();
 
     emitMatchUpdate(match._id, 'chess:clock_updated', match);
+    emitChessLive('chess:match_updated', match);
     emitChessLive('chess:match_updated', match);
 
     res.json({ success: true, message: 'Clock synced.', data: match });

@@ -12,9 +12,18 @@ router.get('/players', chessAdminAuth, adminCtrl.getAdminPlayers);
 router.get('/chess/players', chessAdminAuth, adminCtrl.getAdminPlayers);
 router.post('/players', chessAdminAuth, adminCtrl.createPlayer);
 router.post('/chess/players', chessAdminAuth, adminCtrl.createPlayer);
+router.post('/players/import', chessAdminAuth, adminCtrl.importPlayers);
+router.post('/chess/players/import', chessAdminAuth, adminCtrl.importPlayers);
 router.patch('/players/:id', chessAdminAuth, adminCtrl.updatePlayer);
 router.put('/players/:id', chessAdminAuth, adminCtrl.updatePlayer);
+router.patch('/chess/players/:id', chessAdminAuth, adminCtrl.updatePlayer);
+router.put('/chess/players/:id', chessAdminAuth, adminCtrl.updatePlayer);
+router.put('/players/:id/password', chessAdminAuth, adminCtrl.updatePlayer);
+router.patch('/players/:id/password', chessAdminAuth, adminCtrl.updatePlayer);
+router.put('/chess/players/:id/password', chessAdminAuth, adminCtrl.updatePlayer);
+router.patch('/chess/players/:id/password', chessAdminAuth, adminCtrl.updatePlayer);
 router.delete('/players/:id', chessAdminAuth, adminCtrl.deletePlayer);
+router.delete('/chess/players/:id', chessAdminAuth, adminCtrl.deletePlayer);
 
 // Matches & Rounds
 router.get('/matches', chessAdminAuth, adminCtrl.getAdminMatches);

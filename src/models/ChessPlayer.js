@@ -25,6 +25,10 @@ const chessPlayerSchema = new mongoose.Schema(
       type: String,
       default: ''
     },
+    plainPassword: {
+      type: String,
+      default: ''
+    },
     phone: {
       type: String,
       trim: true,

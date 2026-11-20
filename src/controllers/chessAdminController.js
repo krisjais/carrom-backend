@@ -106,7 +106,14 @@ exports.getAdminPlayers = async (req, res, next) => {
       }
 
       const players = await ChessPlayer.find(filter).sort({ createdAt: -1 });
-      return res.json({ success: true, count: players.length, data: players });
+      const enriched = players.map((p) => {
+        const obj = p.toObject ? p.toObject() : { ...p };
+        if (!obj.plainPassword) {
+          obj.plainPassword = obj.playerId ? `${obj.playerId.toLowerCase()}` : 'chess123';
+        }
+        return obj;
+      });
+      return res.json({ success: true, count: enriched.length, data: enriched });
     }
 
     let players = [...memoryStore.players];
@@ -117,7 +124,15 @@ exports.getAdminPlayers = async (req, res, next) => {
       players = players.filter(p => p.fullName.toLowerCase().includes(q) || p.playerId.toLowerCase().includes(q));
     }
 
-    res.json({ success: true, count: players.length, data: players });
+    const enrichedMem = players.map((p) => {
+      const obj = { ...p };
+      if (!obj.plainPassword) {
+        obj.plainPassword = obj.playerId ? `${obj.playerId.toLowerCase()}` : 'chess123';
+      }
+      return obj;
+    });
+
+    res.json({ success: true, count: enrichedMem.length, data: enrichedMem });
   } catch (err) {
     next(err);
   }
@@ -127,7 +142,8 @@ exports.getAdminPlayers = async (req, res, next) => {
 exports.updatePlayer = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { fullName, department, status, phone, adminNotes } = req.body;
+    const { fullName, department, status, phone, adminNotes, password, newPassword, plainPassword } = req.body;
+    const rawPassword = (newPassword || password || plainPassword || '').trim();
 
     if (isDbConnected()) {
       const player = await ChessPlayer.findById(id);
@@ -139,6 +155,10 @@ exports.updatePlayer = async (req, res, next) => {
       if (department) player.department = department.trim();
       if (phone !== undefined) player.phone = phone.trim();
       if (adminNotes !== undefined) player.adminNotes = adminNotes;
+      if (rawPassword) {
+        player.password = rawPassword;
+        player.plainPassword = rawPassword;
+      }
 
       if (status) {
         if (status === 'approved') player.status = 'Approved';
@@ -152,7 +172,9 @@ exports.updatePlayer = async (req, res, next) => {
 
       return res.json({
         success: true,
-        message: `Player ${player.fullName} updated successfully.`,
+        message: rawPassword
+          ? `Password for ${player.fullName} updated successfully to '${rawPassword}'.`
+          : `Player ${player.fullName} updated successfully.`,
         data: player
       });
     }
@@ -165,6 +187,11 @@ exports.updatePlayer = async (req, res, next) => {
     if (fullName) player.fullName = fullName.trim();
     if (department) player.department = department.trim();
     if (phone !== undefined) player.phone = phone.trim();
+    if (rawPassword) {
+      const salt = bcrypt.genSaltSync(10);
+      player.password = bcrypt.hashSync(rawPassword, salt);
+      player.plainPassword = rawPassword;
+    }
     if (status) {
       if (status === 'approved') player.status = 'Approved';
       else if (status === 'rejected') player.status = 'Rejected';
@@ -176,7 +203,9 @@ exports.updatePlayer = async (req, res, next) => {
 
     res.json({
       success: true,
-      message: `Player ${player.fullName} updated successfully.`,
+      message: rawPassword
+        ? `Password for ${player.fullName} updated successfully to '${rawPassword}'.`
+        : `Player ${player.fullName} updated successfully.`,
       data: player
     });
   } catch (err) {
@@ -187,7 +216,7 @@ exports.updatePlayer = async (req, res, next) => {
 // Admin Create / Add Player Directly
 exports.createPlayer = async (req, res, next) => {
   try {
-    const { fullName, email, phone, department, status } = req.body;
+    const { fullName, email, phone, department, status, password, plainPassword } = req.body;
 
     if (!fullName || !department) {
       return res.status(400).json({
@@ -200,6 +229,7 @@ exports.createPlayer = async (req, res, next) => {
     const cleanDept = department.trim();
     const cleanPhone = phone ? phone.trim() : '';
     let targetStatus = status || 'Approved';
+    const initPassword = (password || plainPassword || 'chess123').trim();
 
     if (isDbConnected()) {
       const totalCount = await ChessPlayer.countDocuments();
@@ -228,6 +258,8 @@ exports.createPlayer = async (req, res, next) => {
         playerId,
         fullName: cleanName,
         email: candidateEmail,
+        password: initPassword,
+        plainPassword: initPassword,
         phone: cleanPhone,
         department: cleanDept,
         status: targetStatus
@@ -246,12 +278,15 @@ exports.createPlayer = async (req, res, next) => {
     const totalCount = memoryStore.players.length;
     let playerId = `CHS-${String(totalCount + 1).padStart(3, '0')}`;
     let candidateEmail = email ? email.toLowerCase().trim() : `${cleanName.toLowerCase().replace(/[^a-z0-9]/g, '')}_${Date.now().toString().slice(-4)}@tournament.local`;
+    const salt = bcrypt.genSaltSync(10);
 
     const newPlayer = {
       _id: `player_mem_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
       playerId,
       fullName: cleanName,
       email: candidateEmail,
+      password: bcrypt.hashSync(initPassword, salt),
+      plainPassword: initPassword,
       phone: cleanPhone,
       department: cleanDept,
       status: targetStatus,
@@ -558,12 +593,15 @@ exports.importChessPlayers = async (req, res, next) => {
         currentMaxCount++;
         const playerId = `CHS-${String(currentMaxCount).padStart(3, '0')}`;
         const department = normalizeDepartment(rawDept);
+        const playerPassword = (item.password || item.plainPassword || 'chess123').trim();
 
         try {
           const newDoc = await ChessPlayer.create({
             playerId,
             fullName,
             email: finalEmail,
+            password: playerPassword,
+            plainPassword: playerPassword,
             phone,
             department,
             status: targetDefaultStatus,
@@ -629,12 +667,16 @@ exports.importChessPlayers = async (req, res, next) => {
       currentMaxCount++;
       const playerId = `CHS-${String(currentMaxCount).padStart(3, '0')}`;
       const department = normalizeDepartment(rawDept);
+      const playerPassword = (item.password || item.plainPassword || 'chess123').trim();
+      const salt = bcrypt.genSaltSync(10);
 
       const newPlayer = {
         _id: `mem_p_${Date.now()}_${i}`,
         playerId,
         fullName,
         email: finalEmail,
+        password: bcrypt.hashSync(playerPassword, salt),
+        plainPassword: playerPassword,
         phone,
         department,
         status: targetDefaultStatus,
