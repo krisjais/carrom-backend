@@ -127,6 +127,7 @@ app.use('/api/boards', requireDB, boardRoutes);
 app.use('/api/announcements', requireDB, announcementRoutes);
 app.use('/api/stats', requireDB, statsRoutes);
 app.use('/api/chess', chessRoutes);
+app.use('/api/chess/admin', adminChessRoutes);
 app.use('/api/admin', adminChessRoutes);
 
 // Fallback Route Mounts (in case client environment variable omitted /api)
@@ -140,6 +141,7 @@ app.use('/boards', requireDB, boardRoutes);
 app.use('/announcements', requireDB, announcementRoutes);
 app.use('/stats', requireDB, statsRoutes);
 app.use('/chess', chessRoutes);
+app.use('/chess/admin', adminChessRoutes);
 app.use('/admin', adminChessRoutes);
 
 // 404 Route Handler

@@ -391,6 +391,82 @@ exports.deleteRound = async (req, res, next) => {
   }
 };
 
+// Admin Reschedule Round (Resets clocks and status to scheduled for all matches in a round)
+exports.rescheduleRound = async (req, res, next) => {
+  try {
+    const roundParam = req.params.round;
+    const { scheduledTime, durationMinutes } = req.body || {};
+    const roundNum = parseInt(roundParam, 10);
+
+    let updatedMatches = [];
+    if (isDbConnected()) {
+      const query = !isNaN(roundNum) ? { round: roundNum } : { stageName: roundParam };
+      const matches = await ChessMatch.find(query).populate('player1').populate('player2');
+
+      for (const match of matches) {
+        if (match.isBye) continue;
+        const initialSec = (durationMinutes || match.durationMinutes || 10) * 60;
+        match.status = 'scheduled';
+        match.winner = null;
+        match.winnerPlayer = null;
+        match.resultType = null;
+        match.activeTurn = 'white';
+        match.isClockRunning = false;
+        match.whiteTimeRemaining = initialSec;
+        match.blackTimeRemaining = initialSec;
+        match.movesCount = 0;
+        match.lastClockUpdate = new Date();
+        match.player1Score = 0;
+        match.player2Score = 0;
+        match.capturedPieces = { white: [], black: [] };
+        if (scheduledTime) match.scheduledTime = new Date(scheduledTime);
+        if (durationMinutes) match.durationMinutes = durationMinutes;
+        await match.save();
+        updatedMatches.push(match);
+
+        emitMatchUpdate(match._id, 'chess:match_restarted', match);
+        emitMatchUpdate(match._id, 'chess:clock_updated', match);
+      }
+    } else {
+      const matches = memoryStore.matches.filter(m => (!isNaN(roundNum) ? m.round === roundNum : m.stageName === roundParam));
+      for (const match of matches) {
+        if (match.isBye) continue;
+        const initialSec = (durationMinutes || match.durationMinutes || 10) * 60;
+        match.status = 'scheduled';
+        match.winner = null;
+        match.winnerPlayer = null;
+        match.resultType = null;
+        match.activeTurn = 'white';
+        match.isClockRunning = false;
+        match.whiteTimeRemaining = initialSec;
+        match.blackTimeRemaining = initialSec;
+        match.movesCount = 0;
+        match.lastClockUpdate = new Date();
+        match.player1Score = 0;
+        match.player2Score = 0;
+        match.capturedPieces = { white: [], black: [] };
+        if (scheduledTime) match.scheduledTime = new Date(scheduledTime);
+        if (durationMinutes) match.durationMinutes = durationMinutes;
+        updatedMatches.push(match);
+
+        emitMatchUpdate(match._id, 'chess:match_restarted', match);
+        emitMatchUpdate(match._id, 'chess:clock_updated', match);
+      }
+    }
+
+    emitChessLive('chess:matches_updated', updatedMatches);
+
+    return res.json({
+      success: true,
+      message: `Round ${roundParam} matches rescheduled successfully (${updatedMatches.length} match${updatedMatches.length !== 1 ? 'es' : ''} reset).`,
+      count: updatedMatches.length,
+      data: updatedMatches
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
 // Admin Delete All Rounds (Wipes all matches and rounds, resets scores, keeps players)
 exports.deleteAllRounds = async (req, res, next) => {
   try {
@@ -799,20 +875,22 @@ exports.createMatch = async (req, res, next) => {
   }
 };
 
-// Admin Update Match Status / Start Match / Restart Match (PATCH/PUT/POST)
+// Admin Update Match Status / Start Match / Restart Match / Reschedule Match (PATCH/PUT/POST)
 exports.updateMatch = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { status, action } = req.body || {};
+    const { status, action, scheduledTime, boardNumber, venue, durationMinutes, notes } = req.body || {};
 
     const isRestart = action === 'restart' || action === 'reset' || (req.path && req.path.endsWith('/restart')) || (req.originalUrl && req.originalUrl.includes('/restart'));
-    if (isRestart) {
+    const isReschedule = action === 'reschedule' || (req.path && req.path.endsWith('/reschedule')) || (req.originalUrl && req.originalUrl.includes('/reschedule'));
+
+    if (isRestart || isReschedule) {
       let match;
       if (isDbConnected()) {
         match = await ChessMatch.findById(id).populate('player1').populate('player2');
         if (!match) return res.status(404).json({ success: false, message: 'Match not found.' });
 
-        const initialSec = (match.durationMinutes || 10) * 60;
+        const initialSec = (durationMinutes || match.durationMinutes || 10) * 60;
         match.status = 'scheduled';
         match.winner = null;
         match.winnerPlayer = null;
@@ -826,12 +904,17 @@ exports.updateMatch = async (req, res, next) => {
         match.player1Score = 0;
         match.player2Score = 0;
         match.capturedPieces = { white: [], black: [] };
+        if (scheduledTime) match.scheduledTime = new Date(scheduledTime);
+        if (boardNumber !== undefined && boardNumber !== '') match.boardNumber = boardNumber;
+        if (venue !== undefined) match.venue = venue;
+        if (durationMinutes) match.durationMinutes = durationMinutes;
+        if (notes !== undefined) match.notes = notes;
         await match.save();
       } else {
         match = memoryStore.matches.find(m => m._id === id || m.matchId === id);
         if (!match) return res.status(404).json({ success: false, message: 'Match not found.' });
 
-        const initialSec = (match.durationMinutes || 10) * 60;
+        const initialSec = (durationMinutes || match.durationMinutes || 10) * 60;
         match.status = 'scheduled';
         match.winner = null;
         match.winnerPlayer = null;
@@ -845,15 +928,22 @@ exports.updateMatch = async (req, res, next) => {
         match.player1Score = 0;
         match.player2Score = 0;
         match.capturedPieces = { white: [], black: [] };
+        if (scheduledTime) match.scheduledTime = new Date(scheduledTime);
+        if (boardNumber !== undefined && boardNumber !== '') match.boardNumber = boardNumber;
+        if (venue !== undefined) match.venue = venue;
+        if (durationMinutes) match.durationMinutes = durationMinutes;
+        if (notes !== undefined) match.notes = notes;
       }
 
       emitMatchUpdate(id, 'chess:match_restarted', match);
+      emitMatchUpdate(id, 'chess:match_rescheduled', match);
       emitMatchUpdate(id, 'chess:clock_updated', match);
       emitChessLive('chess:match_updated', match);
 
+      const actionMsg = isReschedule ? 'rescheduled' : 'restarted';
       return res.json({
         success: true,
-        message: `Match #${match.matchNumber || match.matchId} restarted successfully. Clocks reset to initial duration.`,
+        message: `Match #${match.matchNumber || match.matchId} ${actionMsg} successfully. Clocks reset to initial duration.`,
         data: match
       });
     }
