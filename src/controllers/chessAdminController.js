@@ -825,16 +825,45 @@ exports.getAdminMatches = async (req, res, next) => {
       const matches = await ChessMatch.find(filter)
         .populate('player1', 'fullName playerId department rank')
         .populate('player2', 'fullName playerId department rank')
-        .sort({ round: 1, createdAt: 1 });
+        .sort({ round: 1, createdAt: 1 })
+        .lean();
 
-      return res.json({ success: true, count: matches.length, data: matches });
+      // Compute dynamic up-to-the-second clock for running live matches
+      const dynamicMatches = matches.map((m) => {
+        if (m.status === 'live' && m.isClockRunning !== false && m.lastClockUpdate) {
+          const elapsed = Math.max(0, Math.floor((Date.now() - new Date(m.lastClockUpdate).getTime()) / 1000));
+          const turn = m.activeTurn && m.activeTurn !== 'none' ? m.activeTurn : 'white';
+          if (turn === 'white' && typeof m.whiteTimeRemaining === 'number') {
+            m.whiteTimeRemaining = Math.max(0, m.whiteTimeRemaining - elapsed);
+          } else if (turn === 'black' && typeof m.blackTimeRemaining === 'number') {
+            m.blackTimeRemaining = Math.max(0, m.blackTimeRemaining - elapsed);
+          }
+        }
+        return m;
+      });
+
+      return res.json({ success: true, count: dynamicMatches.length, data: dynamicMatches });
     }
 
     let matches = [...memoryStore.matches];
     if (round && round !== 'all') matches = matches.filter(m => m.round === Number(round));
     if (status && status !== 'all') matches = matches.filter(m => m.status === status);
 
-    res.json({ success: true, count: matches.length, data: matches });
+    const dynamicMemoryMatches = matches.map((m) => {
+      const doc = { ...m };
+      if (doc.status === 'live' && doc.isClockRunning !== false && doc.lastClockUpdate) {
+        const elapsed = Math.max(0, Math.floor((Date.now() - new Date(doc.lastClockUpdate).getTime()) / 1000));
+        const turn = doc.activeTurn && doc.activeTurn !== 'none' ? doc.activeTurn : 'white';
+        if (turn === 'white' && typeof doc.whiteTimeRemaining === 'number') {
+          doc.whiteTimeRemaining = Math.max(0, doc.whiteTimeRemaining - elapsed);
+        } else if (turn === 'black' && typeof doc.blackTimeRemaining === 'number') {
+          doc.blackTimeRemaining = Math.max(0, doc.blackTimeRemaining - elapsed);
+        }
+      }
+      return doc;
+    });
+
+    res.json({ success: true, count: dynamicMemoryMatches.length, data: dynamicMemoryMatches });
   } catch (err) {
     next(err);
   }
