@@ -2,6 +2,7 @@ const Match = require('../models/Match');
 const Team = require('../models/Team');
 const Tournament = require('../models/Tournament');
 const Participant = require('../models/Participant');
+const CarromBoard = require('../models/CarromBoard');
 
 /**
  * Extracts all unique participant IDs from a populated match
@@ -184,22 +185,37 @@ const recalculateEstimatedTimes = async (tournamentId) => {
 
   if (readyMatches.length === 0) return [];
 
-  // Determine baseline available time for Main Carrom Board
-  let currentBoardTime;
-  const liveMatch = await Match.findOne({ tournamentId, status: 'live' });
-  const lastCompleted = await Match.findOne({ tournamentId, status: 'completed' }).sort({ actualEndTime: -1, updatedAt: -1 });
+  // Fetch all active boards for multi-court timeline calculation
+  const boards = await CarromBoard.find({ tournamentId, status: { $ne: 'maintenance' } }).sort({ boardNumber: 1 });
+  const boardMap = new Map();
+  boards.forEach((b) => boardMap.set(b.boardNumber, b.name));
 
-  if (liveMatch) {
-    const liveStart = liveMatch.actualStartTime ? new Date(liveMatch.actualStartTime).getTime() : Date.now();
-    const liveDur = liveMatch.roundDurationMinutes || liveMatch.durationMinutes || durationMin;
+  // Determine baseline available time per board
+  const boardFreeTimes = new Map();
+
+  // Check live matches per board
+  const liveMatches = await Match.find({ tournamentId, status: 'live' });
+  for (const lm of liveMatches) {
+    const bNum = lm.carromBoardNumber || 1;
+    const liveStart = lm.actualStartTime ? new Date(lm.actualStartTime).getTime() : Date.now();
+    const liveDur = lm.roundDurationMinutes || lm.durationMinutes || durationMin;
     const liveEstEnd = liveStart + liveDur * 60 * 1000;
-    currentBoardTime = new Date(Math.max(Date.now(), liveEstEnd + breakMin * 60 * 1000));
-  } else if (lastCompleted && lastCompleted.actualEndTime) {
-    const lastEnd = new Date(lastCompleted.actualEndTime).getTime();
-    currentBoardTime = new Date(Math.max(Date.now(), lastEnd + breakMin * 60 * 1000, configuredStart.getTime()));
-  } else {
-    currentBoardTime = new Date(Math.max(Date.now(), configuredStart.getTime()));
+    boardFreeTimes.set(bNum, new Date(Math.max(Date.now(), liveEstEnd + breakMin * 60 * 1000)));
   }
+
+  // Check last completed matches per board
+  const completedMatches = await Match.find({ tournamentId, status: 'completed' }).sort({ actualEndTime: -1, updatedAt: -1 });
+  for (const cm of completedMatches) {
+    const bNum = cm.carromBoardNumber || 1;
+    if (!boardFreeTimes.has(bNum) && cm.actualEndTime) {
+      const lastEnd = new Date(cm.actualEndTime).getTime();
+      boardFreeTimes.set(bNum, new Date(Math.max(Date.now(), lastEnd + breakMin * 60 * 1000, configuredStart.getTime())));
+    }
+  }
+
+  const getBoardFreeTime = (bNum) => {
+    return boardFreeTimes.get(bNum) || new Date(Math.max(Date.now(), configuredStart.getTime()));
+  };
 
   // Player finish time tracker for estimated cross-category scheduling
   const playerEstimatedFreeAt = {};
@@ -207,9 +223,11 @@ const recalculateEstimatedTimes = async (tournamentId) => {
   for (const m of readyMatches) {
     const pIds = getMatchParticipantIds(m);
     const mDuration = m.roundDurationMinutes || m.durationMinutes || durationMin;
+    const bNum = m.carromBoardNumber || 1;
+    const boardTime = getBoardFreeTime(bNum);
 
     // Earliest time all players in this match are free from previous estimated matches
-    let matchEarliestStart = currentBoardTime.getTime();
+    let matchEarliestStart = boardTime.getTime();
 
     for (const pId of pIds) {
       if (playerEstimatedFreeAt[pId]) {
@@ -219,14 +237,14 @@ const recalculateEstimatedTimes = async (tournamentId) => {
       }
     }
 
-    const estimatedStart = new Date(Math.max(currentBoardTime.getTime(), matchEarliestStart));
+    const estimatedStart = new Date(Math.max(boardTime.getTime(), matchEarliestStart));
     const estimatedEnd = new Date(estimatedStart.getTime() + mDuration * 60 * 1000);
 
     m.scheduledTime = estimatedStart;
     m.roundDurationMinutes = mDuration;
     m.durationMinutes = mDuration;
-    m.boardName = 'Main Carrom Board';
-    m.carromBoardNumber = 1;
+    m.carromBoardNumber = bNum;
+    m.boardName = boardMap.get(bNum) || m.boardName || `Carrom Board ${bNum}`;
     await m.save();
 
     // Update player free times for subsequent queue estimates
@@ -235,7 +253,7 @@ const recalculateEstimatedTimes = async (tournamentId) => {
     }
 
     // Board becomes free for next match after estimatedEnd + break
-    currentBoardTime = new Date(estimatedEnd.getTime() + breakMin * 60 * 1000);
+    boardFreeTimes.set(bNum, new Date(estimatedEnd.getTime() + breakMin * 60 * 1000));
   }
 
   return readyMatches;
@@ -262,8 +280,10 @@ const enqueueNewlyReadyMatch = async (tournamentId, matchDoc) => {
 
   matchDoc.queuePosition = nextPos;
   matchDoc.status = 'scheduled';
-  matchDoc.boardName = 'Main Carrom Board';
-  matchDoc.carromBoardNumber = 1;
+  if (!matchDoc.carromBoardNumber) {
+    matchDoc.carromBoardNumber = 1;
+    matchDoc.boardName = 'Carrom Board 1';
+  }
   if (!matchDoc.roundDurationMinutes) {
     matchDoc.roundDurationMinutes = durationMin;
     matchDoc.durationMinutes = durationMin;
@@ -275,13 +295,23 @@ const enqueueNewlyReadyMatch = async (tournamentId, matchDoc) => {
 };
 
 /**
- * Generates initial sequential schedule for all playable Round 1 matches across all published categories
+ * Generates/reschedules sequential schedule across selected or all categories
+ * Supports:
+ * - Specific category filtering ('all' vs 'boys_singles', etc.)
+ * - Restarting matches (resetting live & completed matches back to 0-0 fresh schedule)
+ * - Intelligent court distribution across Board 1, Board 2, etc.
  */
 const generateSequentialSchedule = async (tournamentId, settings = {}, adminUserId = null) => {
   const tournament = await Tournament.findById(tournamentId);
   if (!tournament) throw new Error('Tournament not found.');
 
-  const roundDuration = Number(settings.roundDurationMinutes || settings.matchDurationMinutes || tournament.scheduleSettings.roundDurationMinutes || tournament.scheduleSettings.matchDurationMinutes || 20);
+  const roundDuration = Number(
+    settings.roundDurationMinutes ||
+    settings.matchDurationMinutes ||
+    tournament.scheduleSettings?.roundDurationMinutes ||
+    tournament.scheduleSettings?.matchDurationMinutes ||
+    20
+  );
 
   if (settings.startTime) tournament.scheduleSettings.startTime = new Date(settings.startTime);
   tournament.scheduleSettings.roundDurationMinutes = roundDuration;
@@ -292,41 +322,119 @@ const generateSequentialSchedule = async (tournamentId, settings = {}, adminUser
   tournament.markModified('scheduleSettings');
   await tournament.save();
 
-  // Find all matches that have known teams and are not completed or bye
-  const playableMatches = await Match.find({
+  const selectedCategory = settings.category && settings.category !== 'all' ? settings.category : null;
+  const restartMatches = settings.restartMatches === true || settings.restartMatches === 'true';
+
+  // Base match query for matches with known teams and not BYE
+  const matchFilter = {
     tournamentId,
     isBye: false,
-    status: { $ne: 'completed' },
     team1: { $ne: null },
     team2: { $ne: null }
-  }).sort({ roundNumber: 1, category: 1, matchNumber: 1 });
+  };
 
-  // Assign sequential queuePositions 1..N
+  if (selectedCategory) {
+    matchFilter.category = selectedCategory;
+  }
+
+  // If NOT restarting, we only reschedule uncompleted matches
+  if (!restartMatches) {
+    matchFilter.status = { $ne: 'completed' };
+  }
+
+  const playableMatches = await Match.find(matchFilter).sort({ roundNumber: 1, category: 1, matchNumber: 1 });
+
+  // Get active courts/boards
+  const boards = await CarromBoard.find({ tournamentId, status: { $ne: 'maintenance' } }).sort({ boardNumber: 1 });
+  const boardCount = boards.length || 1;
+
+  // Default empty board states for fresh reset
+  const defaultBoards = [
+    { boardNumber: 1, team1Score: 0, team2Score: 0, queenPocketedBy: 'none', queenCovered: false, team1Fouls: 0, team2Fouls: 0, boardWinner: null },
+    { boardNumber: 2, team1Score: 0, team2Score: 0, queenPocketedBy: 'none', queenCovered: false, team1Fouls: 0, team2Fouls: 0, boardWinner: null },
+    { boardNumber: 3, team1Score: 0, team2Score: 0, queenPocketedBy: 'none', queenCovered: false, team1Fouls: 0, team2Fouls: 0, boardWinner: null }
+  ];
+
   let qPos = 1;
-  for (const m of playableMatches) {
+  let restartedCount = 0;
+
+  for (let i = 0; i < playableMatches.length; i++) {
+    const m = playableMatches[i];
+
+    if (restartMatches) {
+      // Free any CarromBoard where this match was active
+      await CarromBoard.updateMany(
+        { tournamentId, currentMatchId: m._id },
+        { status: 'available', currentMatchId: null }
+      );
+
+      m.status = 'scheduled';
+      m.boards = defaultBoards;
+      m.team1Score = 0;
+      m.team2Score = 0;
+      m.team1BoardsWon = 0;
+      m.team2BoardsWon = 0;
+      m.winner = null;
+      m.winnerTeam = null;
+      m.resultType = null;
+      m.actualStartTime = null;
+      m.actualEndTime = null;
+      m.isTimerPaused = false;
+      m.timerPausedAt = null;
+      m.timeElapsedBeforePause = 0;
+      m.extraTimeMinutes = 0;
+      restartedCount++;
+    } else {
+      m.status = m.status === 'live' ? 'live' : 'scheduled';
+    }
+
     m.queuePosition = qPos++;
-    m.status = m.status === 'live' ? 'live' : 'scheduled';
-    m.boardName = 'Main Carrom Board';
-    m.carromBoardNumber = 1;
     m.roundDurationMinutes = roundDuration;
     m.durationMinutes = roundDuration;
+
+    // Distribute court/board if multiple courts exist
+    if (settings.targetBoardNumber) {
+      const bNum = Number(settings.targetBoardNumber);
+      const bObj = boards.find((b) => b.boardNumber === bNum);
+      m.carromBoardNumber = bNum;
+      m.boardName = bObj?.name || `Carrom Board ${bNum}`;
+    } else if (settings.distributeCourts !== false && boardCount > 1) {
+      // Check if any board has assignedCategory matching this match's category
+      const catBoard = boards.find((b) => b.assignedCategory === m.category);
+      if (catBoard) {
+        m.carromBoardNumber = catBoard.boardNumber;
+        m.boardName = catBoard.name;
+      } else {
+        // Distribute round-robin among boards assigned to 'all' or all boards
+        const eligibleBoards = boards.filter((b) => b.assignedCategory === 'all' || b.assignedCategory === m.category);
+        const pool = eligibleBoards.length > 0 ? eligibleBoards : boards;
+        const assignedB = pool[i % pool.length];
+        m.carromBoardNumber = assignedB.boardNumber;
+        m.boardName = assignedB.name;
+      }
+    } else {
+      m.carromBoardNumber = boards[0]?.boardNumber || 1;
+      m.boardName = boards[0]?.name || 'Carrom Board 1';
+    }
+
     await m.save();
   }
 
   // Ensure all matches with TBD/null teams remain pending (WAITING)
+  const pendingFilter = {
+    tournamentId,
+    isBye: false,
+    $or: [{ team1: null }, { team2: null }]
+  };
+  if (selectedCategory) pendingFilter.category = selectedCategory;
+
   await Match.updateMany(
-    {
-      tournamentId,
-      isBye: false,
-      $or: [{ team1: null }, { team2: null }]
-    },
+    pendingFilter,
     {
       $set: {
         status: 'pending',
         queuePosition: null,
-        scheduledTime: null,
-        boardName: 'Main Carrom Board',
-        carromBoardNumber: 1
+        scheduledTime: null
       }
     }
   );
@@ -337,6 +445,8 @@ const generateSequentialSchedule = async (tournamentId, settings = {}, adminUser
   return {
     success: true,
     totalQueued: playableMatches.length,
+    restartedCount,
+    category: selectedCategory || 'all',
     scheduleSettings: tournament.scheduleSettings
   };
 };

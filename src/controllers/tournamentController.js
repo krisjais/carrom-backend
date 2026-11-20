@@ -150,7 +150,7 @@ const updateTournamentSettings = async (req, res, next) => {
   }
 };
 
-// Generate full sequential schedule on Main Carrom Board
+// Generate / reschedule schedule across selected or all categories (with restart support)
 const generateTournamentSchedule = async (req, res, next) => {
   try {
     const tournament = await Tournament.findOne().sort({ createdAt: -1 });
@@ -160,6 +160,9 @@ const generateTournamentSchedule = async (req, res, next) => {
 
     const result = await generateSequentialSchedule(tournament._id, req.body, req.user._id);
 
+    const catName = result.category === 'all' ? 'All Categories' : result.category;
+    const restartNote = result.restartedCount > 0 ? ` (${result.restartedCount} matches restarted to 0-0)` : '';
+
     await AuditLog.create({
       action: 'GENERATE_SEQUENTIAL_SCHEDULE',
       performedBy: req.user._id,
@@ -167,12 +170,12 @@ const generateTournamentSchedule = async (req, res, next) => {
       entityType: 'Tournament',
       entityId: tournament._id.toString(),
       details: { settings: req.body, result },
-      reason: `Generated sequential match schedule for Main Carrom Board.`
+      reason: `Rescheduled match queue for ${catName}${restartNote}.`
     });
 
     res.json({
       success: true,
-      message: 'Sequential schedule generated successfully for Main Carrom Board.',
+      message: `Schedule updated successfully for ${catName}.${restartNote}`,
       result
     });
   } catch (error) {
