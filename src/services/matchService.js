@@ -93,6 +93,59 @@ const createManualMatch = async (matchData) => {
     customRoundName = `Round ${targetRound}`;
   }
 
+  if (player1Id && player2Id && player1Id.toString() === player2Id.toString()) {
+    throw new Error('Player 1 and Player 2 cannot be the same contestant.');
+  }
+
+  // Validate that neither player is already assigned in this round
+  const existingRoundMatches = isDbConnected()
+    ? await ChessMatch.find({
+        $or: [
+          { round: targetRound },
+          { roundName: new RegExp(`^${customRoundName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }
+        ]
+      }).populate('player1 player2 byePlayer')
+    : memoryStore.matches.filter(m => m.round === targetRound || (m.roundName || '').toLowerCase() === customRoundName.toLowerCase());
+
+  const assignedPlayerIds = new Set();
+  const assignedPlayerNames = new Set();
+  existingRoundMatches.forEach(m => {
+    [m.player1, m.player2, m.byePlayer].filter(Boolean).forEach(p => {
+      const pId = (p._id || p.playerId || p).toString();
+      assignedPlayerIds.add(pId);
+      if (p.fullName) {
+        assignedPlayerNames.add(p.fullName.trim().toLowerCase());
+      }
+    });
+  });
+
+  // Fetch player 1 and player 2 documents to verify name and ID uniqueness in this round
+  let p1Doc = null;
+  let p2Doc = null;
+  if (isDbConnected()) {
+    if (player1Id) p1Doc = await ChessPlayer.findById(player1Id);
+    if (player2Id) p2Doc = await ChessPlayer.findById(player2Id);
+  } else {
+    if (player1Id) p1Doc = memoryStore.players.find(p => (p._id || p.playerId) === player1Id);
+    if (player2Id) p2Doc = memoryStore.players.find(p => (p._id || p.playerId) === player2Id);
+  }
+
+  if (p1Doc) {
+    const p1IdStr = (p1Doc._id || p1Doc.playerId || '').toString();
+    const p1Name = (p1Doc.fullName || '').trim().toLowerCase();
+    if (assignedPlayerIds.has(p1IdStr) || (p1Name && assignedPlayerNames.has(p1Name))) {
+      throw new Error(`Contestant "${p1Doc.fullName}" is already assigned to a match in ${customRoundName}. A player cannot play multiple matches in the same round.`);
+    }
+  }
+
+  if (p2Doc) {
+    const p2IdStr = (p2Doc._id || p2Doc.playerId || '').toString();
+    const p2Name = (p2Doc.fullName || '').trim().toLowerCase();
+    if (assignedPlayerIds.has(p2IdStr) || (p2Name && assignedPlayerNames.has(p2Name))) {
+      throw new Error(`Contestant "${p2Doc.fullName}" is already assigned to a match in ${customRoundName}. A player cannot play multiple matches in the same round.`);
+    }
+  }
+
   const duration = Number(durationMinutes) || 10;
 
   let mCounter = (isDbConnected() ? await ChessMatch.countDocuments() : memoryStore.matches.length) + 1;

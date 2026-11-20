@@ -38,7 +38,7 @@ const generateRoundPairings = async (roundNumber = null, roundName = null) => {
   }
 
   // 1. Get all eligible players (Approved or Active status)
-  const eligiblePlayers = isDbConnected
+  const rawEligiblePlayers = isDbConnected
     ? await ChessPlayer.find({
         status: { $in: ['Approved', 'Active', 'approved', 'active'] }
       }).sort({ tournamentPoints: -1, materialPoints: -1, wins: -1, fullName: 1 })
@@ -46,13 +46,28 @@ const generateRoundPairings = async (roundNumber = null, roundName = null) => {
         .filter(p => ['Approved', 'Active', 'approved', 'active'].includes(p.status))
         .sort((a, b) => (b.tournamentPoints || 0) - (a.tournamentPoints || 0) || (b.materialPoints || 0) - (a.materialPoints || 0));
 
+  // Deduplicate eligible players by unique ID and normalized full name
+  const seenPlayerIds = new Set();
+  const seenPlayerNames = new Set();
+  const eligiblePlayers = [];
+
+  for (const player of rawEligiblePlayers) {
+    const idStr = (player._id || player.playerId || '').toString();
+    const normName = (player.fullName || '').trim().toLowerCase();
+    if (idStr && seenPlayerIds.has(idStr)) continue;
+    if (normName && seenPlayerNames.has(normName)) continue;
+    if (idStr) seenPlayerIds.add(idStr);
+    if (normName) seenPlayerNames.add(normName);
+    eligiblePlayers.push(player);
+  }
+
   if (eligiblePlayers.length < 2) {
     throw new Error('At least 2 approved players are required to generate pairings.');
   }
 
   // Check if matches already exist for targetRound or exact same round name
   let existingMatches = isDbConnected
-    ? await ChessMatch.find({ round: targetRound })
+    ? await ChessMatch.find({ round: targetRound }).populate('player1 player2 byePlayer')
     : memoryStore.matches.filter(m => m.round === targetRound);
 
   const exactSameRound = existingMatches.find(m => (m.roundName || '').toLowerCase() === customRoundName.toLowerCase());
@@ -64,12 +79,25 @@ const generateRoundPairings = async (roundNumber = null, roundName = null) => {
   while (existingMatches.length > 0) {
     targetRound++;
     existingMatches = isDbConnected
-      ? await ChessMatch.find({ round: targetRound })
+      ? await ChessMatch.find({ round: targetRound }).populate('player1 player2 byePlayer')
       : memoryStore.matches.filter(m => m.round === targetRound);
   }
 
+  // Check any players already assigned in this target round (if matches were partially created)
+  const alreadyAssignedInRound = new Set();
+  const alreadyAssignedNamesInRound = new Set();
+  existingMatches.forEach(m => {
+    [m.player1, m.player2, m.byePlayer].filter(Boolean).forEach(p => {
+      const pId = (p._id || p.playerId || p).toString();
+      alreadyAssignedInRound.add(pId);
+      if (p.fullName) {
+        alreadyAssignedNamesInRound.add(p.fullName.trim().toLowerCase());
+      }
+    });
+  });
+
   // Retrieve all previous matches
-  const pastMatches = isDbConnected ? await ChessMatch.find({}) : memoryStore.matches;
+  const pastMatches = isDbConnected ? await ChessMatch.find({}).populate('player1 player2 byePlayer') : memoryStore.matches;
   const playedPairs = new Set();
   pastMatches.forEach(m => {
     if (m.player1 && m.player2) {
@@ -80,7 +108,11 @@ const generateRoundPairings = async (roundNumber = null, roundName = null) => {
     }
   });
 
-  let playerPool = [...eligiblePlayers];
+  let playerPool = eligiblePlayers.filter(p => {
+    const idStr = (p._id || p.playerId || '').toString();
+    const normName = (p.fullName || '').trim().toLowerCase();
+    return !alreadyAssignedInRound.has(idStr) && !alreadyAssignedNamesInRound.has(normName);
+  });
 
   // 2. Knockout rule: If previous round matches exist, require them to be completed and advance winners & BYEs
   if (pastMatches.length > 0) {
@@ -96,40 +128,62 @@ const generateRoundPairings = async (roundNumber = null, roundName = null) => {
         }
 
       const advancingPlayerIds = new Set();
+      const advancingPlayerNames = new Set();
       prevRoundMatches.forEach(m => {
-        const p1Id = (m.player1?._id || m.player1 || m.byePlayer?._id || m.byePlayer)?.toString();
-        const p2Id = (m.player2?._id || m.player2)?.toString();
+        const p1 = m.player1 || m.byePlayer;
+        const p2 = m.player2;
+        const p1Id = (p1?._id || p1?.playerId || p1)?.toString();
+        const p2Id = (p2?._id || p2?.playerId || p2)?.toString();
+        const p1Name = (p1?.fullName || '').trim().toLowerCase();
+        const p2Name = (p2?.fullName || '').trim().toLowerCase();
 
         if (m.isBye) {
           if (p1Id) advancingPlayerIds.add(p1Id);
+          if (p1Name) advancingPlayerNames.add(p1Name);
         } else if (m.winner === 'player1') {
           if (p1Id) advancingPlayerIds.add(p1Id);
+          if (p1Name) advancingPlayerNames.add(p1Name);
         } else if (m.winner === 'player2') {
           if (p2Id) advancingPlayerIds.add(p2Id);
+          if (p2Name) advancingPlayerNames.add(p2Name);
         } else if (m.winner === 'draw') {
           // In case of a draw, advance player with higher material score
           if ((m.player1MaterialScore || 0) >= (m.player2MaterialScore || 0)) {
             if (p1Id) advancingPlayerIds.add(p1Id);
+            if (p1Name) advancingPlayerNames.add(p1Name);
           } else {
             if (p2Id) advancingPlayerIds.add(p2Id);
+            if (p2Name) advancingPlayerNames.add(p2Name);
           }
         } else if (m.winnerPlayer) {
           advancingPlayerIds.add(m.winnerPlayer.toString());
         }
       });
 
-      // Keep ONLY winning/advancing players in the pool
+      // Keep ONLY winning/advancing players in the pool (and not already assigned in target round)
       playerPool = playerPool.filter(p => {
         const idStr = (p._id || p.playerId).toString();
-        return advancingPlayerIds.has(idStr);
+        const normName = (p.fullName || '').trim().toLowerCase();
+        const isAdvancing = advancingPlayerIds.has(idStr) || (normName && advancingPlayerNames.has(normName));
+        return isAdvancing && !alreadyAssignedInRound.has(idStr) && !alreadyAssignedNamesInRound.has(normName);
       });
 
       if (playerPool.length < 2) {
+        if (alreadyAssignedInRound.size > 0) {
+          throw new Error(`All advancing players are already scheduled in ${customRoundName}.`);
+        }
         throw new Error(`Only ${playerPool.length} advancing player remaining. The tournament has concluded with a champion!`);
       }
     }
   }
 }
+
+  if (playerPool.length < 2) {
+    if (alreadyAssignedInRound.size > 0) {
+      throw new Error(`All eligible players are already scheduled in ${customRoundName}.`);
+    }
+    throw new Error(`At least 2 available players are required to generate pairings for ${customRoundName}.`);
+  }
 
   // Sort remaining pool
   playerPool.sort((a, b) => {

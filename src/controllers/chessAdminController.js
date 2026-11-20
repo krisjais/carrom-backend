@@ -353,38 +353,74 @@ exports.deletePlayer = async (req, res, next) => {
   }
 };
 
-// Admin Delete Round (Deletes all fixtures in specified round)
+// Admin Delete Round (Deletes all fixtures in specified round by number or name)
 exports.deleteRound = async (req, res, next) => {
   try {
-    const roundNum = parseInt(req.params.round, 10);
-    if (isNaN(roundNum) || roundNum < 1) {
-      return res.status(400).json({ success: false, message: 'Invalid round number.' });
+    const roundParam = req.params.round;
+    const roundNum = parseInt(roundParam, 10);
+    const roundName = req.query.roundName || req.body?.roundName;
+
+    // Build query matching round number, roundName, or stageName
+    const orConditions = [];
+
+    if (!isNaN(roundNum) && roundNum > 0) {
+      orConditions.push({ round: roundNum });
     }
+    if (roundName && typeof roundName === 'string' && roundName.trim()) {
+      const escaped = roundName.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      orConditions.push({ roundName: new RegExp(`^${escaped}$`, 'i') });
+      orConditions.push({ stageName: new RegExp(`^${escaped}$`, 'i') });
+    }
+    if (isNaN(roundNum) && roundParam && roundParam !== 'undefined') {
+      const escaped = roundParam.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      orConditions.push({ roundName: new RegExp(`^${escaped}$`, 'i') });
+      orConditions.push({ stageName: new RegExp(`^${escaped}$`, 'i') });
+    }
+
+    if (orConditions.length === 0) {
+      return res.status(400).json({ success: false, message: 'Invalid round specified for deletion.' });
+    }
+
+    const query = orConditions.length === 1 ? orConditions[0] : { $or: orConditions };
 
     let deletedCount = 0;
     if (isDbConnected()) {
-      const deleteRes = await ChessMatch.deleteMany({ round: roundNum });
+      const deleteRes = await ChessMatch.deleteMany(query);
       deletedCount = deleteRes.deletedCount || 0;
-      await ChessRound.deleteOne({ roundNumber: roundNum });
+      if (!isNaN(roundNum) && roundNum > 0) {
+        await ChessRound.deleteOne({ roundNumber: roundNum });
+      }
       await recalculateAllStandings();
+      emitChessLive('chess:matches_generated', null);
 
+      const targetLabel = roundName || (!isNaN(roundNum) ? `Round ${roundNum}` : roundParam);
       return res.json({
         success: true,
-        message: `Round ${roundNum} and its ${deletedCount} match(es) were deleted successfully.`,
-        data: { round: roundNum, deletedCount }
+        message: `${targetLabel} and its ${deletedCount} match(es) were deleted successfully.`,
+        data: { round: roundNum || roundParam, deletedCount }
       });
     }
 
+    // Memory store fallback
     const initialLen = memoryStore.matches.length;
-    memoryStore.matches = memoryStore.matches.filter(m => m.round !== roundNum);
+    memoryStore.matches = memoryStore.matches.filter(m => {
+      const matchNum = !isNaN(roundNum) && m.round === roundNum;
+      const matchName = roundName && (m.roundName || '').toLowerCase() === roundName.trim().toLowerCase();
+      const matchParam = isNaN(roundNum) && (m.roundName || '').toLowerCase() === roundParam.trim().toLowerCase();
+      return !(matchNum || matchName || matchParam);
+    });
     deletedCount = initialLen - memoryStore.matches.length;
-    memoryStore.rounds = memoryStore.rounds.filter(r => r.roundNumber !== roundNum);
+    if (!isNaN(roundNum)) {
+      memoryStore.rounds = memoryStore.rounds.filter(r => r.roundNumber !== roundNum);
+    }
     await recalculateAllStandings();
+    emitChessLive('chess:matches_generated', null);
 
+    const targetLabel = roundName || (!isNaN(roundNum) ? `Round ${roundNum}` : roundParam);
     res.json({
       success: true,
-      message: `Round ${roundNum} and its ${deletedCount} match(es) were deleted successfully.`,
-      data: { round: roundNum, deletedCount }
+      message: `${targetLabel} and its ${deletedCount} match(es) were deleted successfully.`,
+      data: { round: roundNum || roundParam, deletedCount }
     });
   } catch (err) {
     next(err);
