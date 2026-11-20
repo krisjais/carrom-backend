@@ -715,6 +715,8 @@ exports.importChessPlayers = async (req, res, next) => {
   }
 };
 
+exports.importPlayers = exports.importChessPlayers;
+
 // Admin Generate Matches
 exports.generateMatches = async (req, res, next) => {
   try {
