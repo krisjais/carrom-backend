@@ -797,11 +797,64 @@ exports.createMatch = async (req, res, next) => {
   }
 };
 
-// Admin Update Match Status / Start Match (PATCH/PUT)
+// Admin Update Match Status / Start Match / Restart Match (PATCH/PUT/POST)
 exports.updateMatch = async (req, res, next) => {
   try {
     const { id } = req.params;
     const { status, action } = req.body || {};
+
+    const isRestart = action === 'restart' || action === 'reset' || (req.path && req.path.endsWith('/restart')) || (req.originalUrl && req.originalUrl.includes('/restart'));
+    if (isRestart) {
+      let match;
+      if (isDbConnected()) {
+        match = await ChessMatch.findById(id).populate('player1').populate('player2');
+        if (!match) return res.status(404).json({ success: false, message: 'Match not found.' });
+
+        const initialSec = (match.durationMinutes || 10) * 60;
+        match.status = 'scheduled';
+        match.winner = null;
+        match.winnerPlayer = null;
+        match.resultType = null;
+        match.activeTurn = 'white';
+        match.isClockRunning = false;
+        match.whiteTimeRemaining = initialSec;
+        match.blackTimeRemaining = initialSec;
+        match.movesCount = 0;
+        match.lastClockUpdate = new Date();
+        match.player1Score = 0;
+        match.player2Score = 0;
+        match.capturedPieces = { white: [], black: [] };
+        await match.save();
+      } else {
+        match = memoryStore.matches.find(m => m._id === id || m.matchId === id);
+        if (!match) return res.status(404).json({ success: false, message: 'Match not found.' });
+
+        const initialSec = (match.durationMinutes || 10) * 60;
+        match.status = 'scheduled';
+        match.winner = null;
+        match.winnerPlayer = null;
+        match.resultType = null;
+        match.activeTurn = 'white';
+        match.isClockRunning = false;
+        match.whiteTimeRemaining = initialSec;
+        match.blackTimeRemaining = initialSec;
+        match.movesCount = 0;
+        match.lastClockUpdate = new Date();
+        match.player1Score = 0;
+        match.player2Score = 0;
+        match.capturedPieces = { white: [], black: [] };
+      }
+
+      emitMatchUpdate(id, 'chess:match_restarted', match);
+      emitMatchUpdate(id, 'chess:clock_updated', match);
+      emitChessLive('chess:match_updated', match);
+
+      return res.json({
+        success: true,
+        message: `Match #${match.matchNumber || match.matchId} restarted successfully. Clocks reset to initial duration.`,
+        data: match
+      });
+    }
 
     const isStart = action === 'start' || status === 'live' || (req.path && req.path.endsWith('/start')) || (req.originalUrl && req.originalUrl.includes('/start'));
     if (isStart) {
