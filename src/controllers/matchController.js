@@ -13,6 +13,7 @@ const {
   canStartMatch,
   recalculateEstimatedTimes
 } = require('../services/scheduleEngine');
+const { emitMatchUpdate, emitCarromLive } = require('../socket');
 
 // Get all matches with filtering
 const getMatches = async (req, res, next) => {
@@ -314,6 +315,9 @@ const startMatch = async (req, res, next) => {
       reason: `Started Match #${match.matchNumber} as LIVE on ${targetBoardName} (Board #${targetBoardNumber}) with ${configuredDuration} min round time.`
     });
 
+    emitMatchUpdate(match._id, 'match:started', { matchId: match._id, match });
+    emitCarromLive('carrom:match_started', { matchId: match._id, match });
+
     res.json({
       success: true,
       message: `Match #${match.matchNumber} is now LIVE on ${targetBoardName} (${configuredDuration} min round).`,
@@ -394,6 +398,9 @@ const updateMatchTimer = async (req, res, next) => {
 
     await match.save();
 
+    emitMatchUpdate(match._id, 'match:timer_updated', { matchId: match._id, match, action });
+    emitCarromLive('carrom:timer_updated', { matchId: match._id, match, action });
+
     res.json({
       success: true,
       message: `Match timer updated (${action}).`,
@@ -409,6 +416,10 @@ const updateScore = async (req, res, next) => {
   try {
     const { id } = req.params;
     const updatedMatch = await updateMatchLiveScore(id, req.body, req.user);
+
+    emitMatchUpdate(id, 'carrom:score_updated', { matchId: id, match: updatedMatch });
+    emitCarromLive('carrom:score_updated', { matchId: id, match: updatedMatch });
+
     res.json({ success: true, message: 'Match score updated.', match: updatedMatch });
   } catch (error) {
     next(error);
@@ -429,6 +440,9 @@ const confirmMatch = async (req, res, next) => {
       );
     }
 
+    emitMatchUpdate(id, 'match:completed', { matchId: id, match: result.match, winnerTeamId });
+    emitCarromLive('carrom:match_completed', { matchId: id, match: result.match, winnerTeamId });
+
     res.json({
       success: true,
       message: 'Match winner confirmed and advanced to bracket.',
@@ -447,6 +461,10 @@ const correctMatch = async (req, res, next) => {
     const { id } = req.params;
     const { boards, reason } = req.body;
     const correctedMatch = await correctMatchResult(id, { boards }, reason, req.user);
+
+    emitMatchUpdate(id, 'carrom:score_updated', { matchId: id, match: correctedMatch });
+    emitCarromLive('carrom:score_updated', { matchId: id, match: correctedMatch });
+
     res.json({
       success: true,
       message: 'Match result corrected successfully.',
@@ -547,6 +565,9 @@ const stopLiveMatch = async (req, res, next) => {
       },
       reason: `Admin stopped live match #${match.matchNumber} and returned it to scheduled queue.`
     });
+
+    emitMatchUpdate(match._id, 'match:stopped', { matchId: match._id, match });
+    emitCarromLive('carrom:match_stopped', { matchId: match._id, match });
 
     res.json({
       success: true,

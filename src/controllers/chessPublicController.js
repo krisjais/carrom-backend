@@ -7,6 +7,7 @@ const ChessRound = require('../models/ChessRound');
 const memoryStore = require('../utils/chessMemoryDb');
 const { getConfiguration } = require('../services/scoringService');
 const { recalculateAllStandings } = require('../services/standingsService');
+const { emitMatchUpdate, emitChessLive } = require('../socket');
 
 const isDbConnected = () => mongoose.connection.readyState === 1;
 
@@ -430,6 +431,10 @@ exports.updateMatchClock = async (req, res, next) => {
 
       await match.save();
       await match.populate('player1 player2 byePlayer');
+
+      emitMatchUpdate(match._id, 'chess:clock_updated', match);
+      emitChessLive('chess:match_updated', match);
+
       return res.json({ success: true, message: 'Clock synced.', data: match });
     }
 
@@ -444,6 +449,9 @@ exports.updateMatchClock = async (req, res, next) => {
     if (typeof isClockRunning === 'boolean') match.isClockRunning = isClockRunning;
     if (status) match.status = status;
     match.lastClockUpdate = new Date();
+
+    emitMatchUpdate(match._id, 'chess:clock_updated', match);
+    emitChessLive('chess:match_updated', match);
 
     res.json({ success: true, message: 'Clock synced.', data: match });
   } catch (err) {

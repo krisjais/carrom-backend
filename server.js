@@ -153,9 +153,17 @@ app.use('*', (req, res) => {
 // Global Error Handler
 app.use(errorHandler);
 
-// Start HTTP server immediately on 0.0.0.0 without blocking Render's port check
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`[Server] Listening on 0.0.0.0:${PORT}`);
+const http = require('http');
+const { initSocket } = require('./src/socket');
+
+// Create HTTP server & initialize Socket.io
+const server = http.createServer(app);
+const io = initSocket(server);
+app.set('io', io);
+
+// Start HTTP & WebSocket server immediately on 0.0.0.0
+server.listen(PORT, '0.0.0.0', () => {
+  console.log(`[Server] Listening on 0.0.0.0:${PORT} (HTTP + Socket.io WebSocket)`);
   console.log(`[Server] Health check: http://localhost:${PORT}/api/health`);
 
   // Connect to Database asynchronously (incoming requests await completion via requireDB)

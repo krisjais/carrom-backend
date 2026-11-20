@@ -9,6 +9,7 @@ const { getConfiguration } = require('../services/scoringService');
 const { generateRoundPairings } = require('../services/pairingService');
 const { submitResult, overrideResult, startMatch, cancelMatch, createManualMatch, updateLiveCaptures } = require('../services/matchService');
 const { recalculateAllStandings } = require('../services/standingsService');
+const { emitMatchUpdate, emitChessLive } = require('../socket');
 
 const isDbConnected = () => mongoose.connection.readyState === 1;
 
@@ -724,6 +725,10 @@ exports.startMatch = async (req, res, next) => {
   try {
     const { id } = req.params;
     const match = await startMatch(id);
+
+    emitMatchUpdate(id, 'chess:match_started', match);
+    emitChessLive('chess:match_started', match);
+
     return res.json({
       success: true,
       message: 'Match started successfully.',
@@ -738,6 +743,8 @@ exports.startMatch = async (req, res, next) => {
 exports.createMatch = async (req, res, next) => {
   try {
     const match = await createManualMatch(req.body);
+    emitChessLive('chess:matches_generated', match);
+
     return res.status(201).json({
       success: true,
       message: 'Manual match pairing created successfully.',
@@ -757,6 +764,9 @@ exports.updateMatch = async (req, res, next) => {
     const isStart = action === 'start' || status === 'live' || (req.path && req.path.endsWith('/start')) || (req.originalUrl && req.originalUrl.includes('/start'));
     if (isStart) {
       const match = await startMatch(id);
+      emitMatchUpdate(id, 'chess:match_started', match);
+      emitChessLive('chess:match_started', match);
+
       return res.json({
         success: true,
         message: 'Match started.',
@@ -766,6 +776,9 @@ exports.updateMatch = async (req, res, next) => {
 
     if (action === 'cancel' || status === 'cancelled') {
       const match = await cancelMatch(id);
+      emitMatchUpdate(id, 'chess:match_cancelled', match);
+      emitChessLive('chess:match_cancelled', match);
+
       return res.json({
         success: true,
         message: 'Match cancelled.',
@@ -780,6 +793,10 @@ exports.updateMatch = async (req, res, next) => {
       }
       if (status) match.status = status;
       await match.save();
+
+      emitMatchUpdate(id, 'chess:match_updated', match);
+      emitChessLive('chess:match_updated', match);
+
       return res.json({ success: true, message: 'Match updated.', data: match });
     }
 
@@ -788,6 +805,9 @@ exports.updateMatch = async (req, res, next) => {
       return res.status(404).json({ success: false, message: 'Match not found.' });
     }
     if (status) match.status = status;
+
+    emitMatchUpdate(id, 'chess:match_updated', match);
+    emitChessLive('chess:match_updated', match);
 
     res.json({ success: true, message: 'Match updated.', data: match });
   } catch (err) {
@@ -800,6 +820,10 @@ exports.updateLiveCaptures = async (req, res, next) => {
   try {
     const { id } = req.params;
     const match = await updateLiveCaptures(id, req.body);
+
+    emitMatchUpdate(id, 'chess:score_updated', match);
+    emitChessLive('chess:match_updated', match);
+
     return res.json({
       success: true,
       message: 'Live material score updated.',
@@ -815,6 +839,9 @@ exports.submitMatchResult = async (req, res, next) => {
   try {
     const { id } = req.params;
     const match = await submitResult(id, req.body);
+
+    emitMatchUpdate(id, 'chess:match_completed', match);
+    emitChessLive('chess:match_completed', match);
 
     res.json({
       success: true,
