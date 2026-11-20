@@ -243,16 +243,19 @@ const getMatchById = async (req, res, next) => {
 const startMatch = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { durationMinutes, roundDurationMinutes, carromBoardNumber, boardName } = req.body || {};
+    const { durationMinutes, roundDurationMinutes, carromBoardNumber, boardName, force, forceStart } = req.body || {};
     const targetBoardNumber = Number(carromBoardNumber) || 1;
     const targetBoardName = boardName || `Carrom Board ${targetBoardNumber}`;
 
-    const readiness = await canStartMatch(id, targetBoardNumber);
+    const readiness = await canStartMatch(id, targetBoardNumber, { force: force || forceStart });
 
     if (!readiness.canStart) {
       return res.status(400).json({
         success: false,
         message: readiness.reason,
+        isPlayerConflict: readiness.isPlayerConflict || false,
+        conflictingMatch: readiness.conflictingMatch,
+        conflictingBoard: readiness.conflictingBoard,
         readiness
       });
     }

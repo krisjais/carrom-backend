@@ -71,8 +71,12 @@ const checkMatchRestAvailability = async (tournamentId, matchDoc) => {
 /**
  * Validates all pre-conditions before a match can be started on a specific Carrom Board.
  * Supports multiple concurrent boards (Board 1, Board 2, Board 3, etc.)
+ * Supports admin forceStart override to bypass participant overlap warnings.
  */
-const canStartMatch = async (matchId, targetBoardNumber = 1) => {
+const canStartMatch = async (matchId, targetBoardNumber = 1, options = {}) => {
+  const { force = false, forceStart = false } = options || {};
+  const isForced = Boolean(force || forceStart);
+
   const match = await Match.findById(matchId)
     .populate({ path: 'team1', populate: [{ path: 'player1' }, { path: 'player2' }] })
     .populate({ path: 'team2', populate: [{ path: 'player1' }, { path: 'player2' }] });
@@ -114,36 +118,41 @@ const canStartMatch = async (matchId, targetBoardNumber = 1) => {
     };
   }
 
-  // 2. Check participant live conflict across ALL other active boards:
-  // A player cannot physically play on Board 1 and Board 2 at the exact same moment!
-  const startingParticipantIds = getMatchParticipantIds(match);
-  const otherLiveMatches = await Match.find({
-    tournamentId: match.tournamentId,
-    status: 'live',
-    _id: { $ne: match._id }
-  })
-    .populate({ path: 'team1', populate: [{ path: 'player1' }, { path: 'player2' }] })
-    .populate({ path: 'team2', populate: [{ path: 'player1' }, { path: 'player2' }] });
+  // 2. Check participant live conflict across ALL other active boards (unless admin forceStart override):
+  if (!isForced) {
+    const startingParticipantIds = getMatchParticipantIds(match).filter(Boolean);
+    const otherLiveMatches = await Match.find({
+      tournamentId: match.tournamentId,
+      status: 'live',
+      _id: { $ne: match._id }
+    })
+      .populate({ path: 'team1', populate: [{ path: 'player1' }, { path: 'player2' }] })
+      .populate({ path: 'team2', populate: [{ path: 'player1' }, { path: 'player2' }] });
 
-  for (const lm of otherLiveMatches) {
-    const liveIds = getMatchParticipantIds(lm);
-    const overlappingId = startingParticipantIds.find((id) => liveIds.includes(id));
-    if (overlappingId) {
+    for (const lm of otherLiveMatches) {
+      const liveIds = getMatchParticipantIds(lm).filter(Boolean);
+      const overlappingId = startingParticipantIds.find((id) => id && liveIds.includes(id));
+      if (overlappingId) {
+        return {
+          canStart: false,
+          isPlayerConflict: true,
+          conflictingMatch: lm.matchNumber,
+          conflictingBoard: lm.carromBoardNumber || 1,
+          reason: `A contestant in this match is currently playing live on Board #${lm.carromBoardNumber || 1} (Match #${lm.matchNumber}). A player cannot participate in two concurrent matches.`
+        };
+      }
+    }
+
+    // 3. Check participant rest availability
+    const restCheck = await checkMatchRestAvailability(match.tournamentId, match);
+    if (!restCheck.isRested) {
       return {
         canStart: false,
-        reason: `A contestant in this match is currently playing live on Board #${lm.carromBoardNumber || 1} (Match #${lm.matchNumber}). A player cannot participate in two concurrent matches.`
+        isRestConflict: true,
+        reason: restCheck.reason,
+        restingPlayerName: restCheck.restingPlayerName
       };
     }
-  }
-
-  // 3. Check participant rest availability
-  const restCheck = await checkMatchRestAvailability(match.tournamentId, match);
-  if (!restCheck.isRested) {
-    return {
-      canStart: false,
-      reason: restCheck.reason,
-      restingPlayerName: restCheck.restingPlayerName
-    };
   }
 
   return { canStart: true, match };
