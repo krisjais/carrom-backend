@@ -70,6 +70,14 @@ const chessMatchSchema = new mongoose.Schema(
       type: Number,
       default: 10
     },
+    boardNumber: {
+      type: Number,
+      default: 1
+    },
+    boardName: {
+      type: String,
+      default: 'Chess Board 1'
+    },
     activeTurn: {
       type: String,
       enum: ['white', 'black', 'paused', 'none'],

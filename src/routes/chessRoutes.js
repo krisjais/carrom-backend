@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const publicCtrl = require('../controllers/chessPublicController');
 const adminCtrl = require('../controllers/chessAdminController');
+const boardCtrl = require('../controllers/chessBoardController');
 const { adminLogin } = require('../controllers/chessController');
 const { chessAdminAuth } = require('../middleware/chessAuth');
 
@@ -20,6 +21,7 @@ router.get('/matches', publicCtrl.getMatches);
 router.get('/matches/:id', publicCtrl.getMatchById);
 router.get('/standings', publicCtrl.getStandings);
 router.get('/rounds', publicCtrl.getRounds);
+router.get('/boards', boardCtrl.getBoards);
 
 // -------------------------------------------------------------
 // ADMIN AUTH & DASHBOARD
@@ -77,5 +79,15 @@ router.get('/admin/standings', chessAdminAuth, adminCtrl.getAdminStandings);
 router.post('/admin/standings/refresh', chessAdminAuth, adminCtrl.getAdminStandings);
 router.put('/admin/settings', chessAdminAuth, adminCtrl.updateSettings);
 router.post('/admin/reset', chessAdminAuth, adminCtrl.resetTournamentData);
+
+// -------------------------------------------------------------
+// ADMIN MULTI-BOARD ARENA CONTROL
+// -------------------------------------------------------------
+router.get('/admin/boards', chessAdminAuth, boardCtrl.getBoards);
+router.post('/admin/boards', chessAdminAuth, boardCtrl.createBoard);
+router.put('/admin/boards/:id', chessAdminAuth, boardCtrl.updateBoard);
+router.delete('/admin/boards/:id', chessAdminAuth, boardCtrl.deleteBoard);
+router.post('/admin/boards/:id/launch', chessAdminAuth, boardCtrl.launchMatchOnBoard);
+router.post('/admin/boards/:id/stop', chessAdminAuth, boardCtrl.stopMatchOnBoard);
 
 module.exports = router;

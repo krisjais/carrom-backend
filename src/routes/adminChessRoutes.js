@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const adminCtrl = require('../controllers/chessAdminController');
+const boardCtrl = require('../controllers/chessBoardController');
 const { chessAdminAuth } = require('../middleware/chessAuth');
 
 // Dashboard
@@ -74,5 +75,19 @@ router.post('/chess/matches/:id/result', chessAdminAuth, adminCtrl.submitMatchRe
 // Standings
 router.get('/standings', chessAdminAuth, adminCtrl.getAdminStandings);
 router.get('/chess/standings', chessAdminAuth, adminCtrl.getAdminStandings);
+
+// Multiple Chess Boards Arena Control
+router.get('/boards', chessAdminAuth, boardCtrl.getBoards);
+router.get('/chess/boards', chessAdminAuth, boardCtrl.getBoards);
+router.post('/boards', chessAdminAuth, boardCtrl.createBoard);
+router.post('/chess/boards', chessAdminAuth, boardCtrl.createBoard);
+router.put('/boards/:id', chessAdminAuth, boardCtrl.updateBoard);
+router.put('/chess/boards/:id', chessAdminAuth, boardCtrl.updateBoard);
+router.delete('/boards/:id', chessAdminAuth, boardCtrl.deleteBoard);
+router.delete('/chess/boards/:id', chessAdminAuth, boardCtrl.deleteBoard);
+router.post('/boards/:id/launch', chessAdminAuth, boardCtrl.launchMatchOnBoard);
+router.post('/chess/boards/:id/launch', chessAdminAuth, boardCtrl.launchMatchOnBoard);
+router.post('/boards/:id/stop', chessAdminAuth, boardCtrl.stopMatchOnBoard);
+router.post('/chess/boards/:id/stop', chessAdminAuth, boardCtrl.stopMatchOnBoard);
 
 module.exports = router;

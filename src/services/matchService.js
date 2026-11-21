@@ -1,10 +1,39 @@
 const mongoose = require('mongoose');
 const ChessMatch = require('../models/ChessMatch');
+const ChessBoard = require('../models/ChessBoard');
 const memoryStore = require('../utils/chessMemoryDb');
 const { getConfiguration, calculateMaterialScore } = require('./scoringService');
 const { recalculateAllStandings } = require('./standingsService');
 
 const isDbConnected = () => mongoose.connection.readyState === 1;
+
+const freeBoard = async (boardNumber, matchId) => {
+  try {
+    if (isDbConnected()) {
+      if (boardNumber) {
+        await ChessBoard.findOneAndUpdate(
+          { boardNumber },
+          { status: 'available', currentMatchId: null }
+        );
+      }
+      if (matchId) {
+        await ChessBoard.updateMany(
+          { currentMatchId: matchId },
+          { status: 'available', currentMatchId: null }
+        );
+      }
+    } else if (memoryStore.boards) {
+      memoryStore.boards.forEach((b) => {
+        if (b.boardNumber === boardNumber || String(b.currentMatchId) === String(matchId)) {
+          b.status = 'available';
+          b.currentMatchId = null;
+        }
+      });
+    }
+  } catch (e) {
+    console.warn('Failed to free chess board:', e.message);
+  }
+};
 
 const CHESS_PIECE_LIMITS = {
   pawns: 8,
@@ -28,7 +57,7 @@ const sanitizeCapturedPieces = (captured = {}) => {
 };
 
 
-const startMatch = async (matchId) => {
+const startMatch = async (matchId, boardNumber = null, boardName = null) => {
   if (isDbConnected()) {
     let match = await ChessMatch.findById(matchId);
     if (!match) {
@@ -37,7 +66,21 @@ const startMatch = async (matchId) => {
     if (!match) throw new Error('Match not found.');
     if (match.status === 'completed') throw new Error('Cannot start a match that is already completed.');
 
+    // Assign board: use explicit boardNumber or pick first available board
+    let assignedBoardNum = boardNumber ? Number(boardNumber) : (match.boardNumber || 1);
+    let assignedBoardTitle = boardName || match.boardName || `Chess Board ${assignedBoardNum}`;
+
+    if (!boardNumber) {
+      const availBoard = await ChessBoard.findOne({ status: 'available' }).sort({ boardNumber: 1 });
+      if (availBoard) {
+        assignedBoardNum = availBoard.boardNumber;
+        assignedBoardTitle = availBoard.name;
+      }
+    }
+
     match.status = 'live';
+    match.boardNumber = assignedBoardNum;
+    match.boardName = assignedBoardTitle;
     match.actualStartTime = new Date();
     match.durationMinutes = 10;
     match.isClockRunning = true;
@@ -48,6 +91,12 @@ const startMatch = async (matchId) => {
     match.lastClockUpdate = new Date();
     await match.save();
 
+    // Update ChessBoard to live
+    await ChessBoard.findOneAndUpdate(
+      { boardNumber: assignedBoardNum },
+      { status: 'live', currentMatchId: match._id }
+    );
+
     return await ChessMatch.findById(match._id)
       .populate('player1', 'fullName playerId department rank')
       .populate('player2', 'fullName playerId department rank');
@@ -55,7 +104,21 @@ const startMatch = async (matchId) => {
 
   const match = memoryStore.matches.find(m => m._id === matchId || m.matchId === matchId);
   if (!match) throw new Error('Match not found.');
+
+  let assignedBoardNum = boardNumber ? Number(boardNumber) : (match.boardNumber || 1);
+  let assignedBoardTitle = boardName || match.boardName || `Chess Board ${assignedBoardNum}`;
+
+  if (!boardNumber && memoryStore.boards) {
+    const availBoard = memoryStore.boards.find(b => b.status === 'available');
+    if (availBoard) {
+      assignedBoardNum = availBoard.boardNumber;
+      assignedBoardTitle = availBoard.name;
+    }
+  }
+
   match.status = 'live';
+  match.boardNumber = assignedBoardNum;
+  match.boardName = assignedBoardTitle;
   match.actualStartTime = new Date();
   match.durationMinutes = 10;
   match.isClockRunning = true;
@@ -64,6 +127,15 @@ const startMatch = async (matchId) => {
   match.blackTimeRemaining = typeof match.blackTimeRemaining === 'number' && match.blackTimeRemaining > 0 ? match.blackTimeRemaining : 600;
   match.movesCount = match.movesCount || 0;
   match.lastClockUpdate = new Date();
+
+  if (memoryStore.boards) {
+    const b = memoryStore.boards.find(x => x.boardNumber === assignedBoardNum);
+    if (b) {
+      b.status = 'live';
+      b.currentMatchId = match._id;
+    }
+  }
+
   return match;
 };
 
@@ -233,6 +305,7 @@ const submitResult = async (matchId, resultData) => {
 
     await match.save();
     await recalculateAllStandings();
+    await freeBoard(match.boardNumber, match._id);
     return match;
   }
 
@@ -263,6 +336,7 @@ const submitResult = async (matchId, resultData) => {
   match.actualEndTime = new Date();
 
   await recalculateAllStandings();
+  await freeBoard(match.boardNumber, match._id);
   return match;
 };
 
@@ -292,6 +366,7 @@ const overrideResult = async (matchId, overrideData) => {
 
     await match.save();
     await recalculateAllStandings();
+    await freeBoard(match.boardNumber, match._id);
     return match;
   }
 
@@ -307,6 +382,7 @@ const overrideResult = async (matchId, overrideData) => {
   match.isVerified = true;
 
   await recalculateAllStandings();
+  await freeBoard(match.boardNumber, match._id);
   return match;
 };
 
@@ -316,12 +392,14 @@ const cancelMatch = async (matchId) => {
     if (!match) throw new Error('Match not found.');
     match.status = 'cancelled';
     await match.save();
+    await freeBoard(match.boardNumber, match._id);
     return match;
   }
 
   const match = memoryStore.matches.find(m => m._id === matchId || m.matchId === matchId);
   if (!match) throw new Error('Match not found.');
   match.status = 'cancelled';
+  await freeBoard(match.boardNumber, match._id);
   return match;
 };
 

@@ -909,14 +909,15 @@ exports.getAdminMatches = async (req, res, next) => {
 exports.startMatch = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const match = await startMatch(id);
+    const { boardNumber, boardName } = req.body || {};
+    const match = await startMatch(id, boardNumber, boardName);
 
     emitMatchUpdate(id, 'chess:match_started', match);
     emitChessLive('chess:match_started', match);
 
     return res.json({
       success: true,
-      message: 'Match started successfully.',
+      message: `Match started successfully on ${match.boardName || `Board #${match.boardNumber || 1}`}.`,
       data: match
     });
   } catch (err) {
@@ -1015,7 +1016,7 @@ exports.updateMatch = async (req, res, next) => {
 
     const isStart = action === 'start' || status === 'live' || (req.path && req.path.endsWith('/start')) || (req.originalUrl && req.originalUrl.includes('/start'));
     if (isStart) {
-      const match = await startMatch(id);
+      const match = await startMatch(id, boardNumber, req.body?.boardName);
       emitMatchUpdate(id, 'chess:match_started', match);
       emitChessLive('chess:match_started', match);
 
