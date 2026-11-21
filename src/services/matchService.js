@@ -136,6 +136,14 @@ const startMatch = async (matchId, boardNumber = null, boardName = null) => {
     }
   }
 
+  // Populate player1 and player2 if string IDs in memory store
+  if (typeof match.player1 === 'string' && Array.isArray(memoryStore.players)) {
+    match.player1 = memoryStore.players.find(p => p._id === match.player1 || p.playerId === match.player1) || { fullName: match.player1 };
+  }
+  if (typeof match.player2 === 'string' && Array.isArray(memoryStore.players)) {
+    match.player2 = memoryStore.players.find(p => p._id === match.player2 || p.playerId === match.player2) || { fullName: match.player2 };
+  }
+
   return match;
 };
 

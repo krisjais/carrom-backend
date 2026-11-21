@@ -144,9 +144,19 @@ exports.getBoards = async (req, res, next) => {
         b.status = 'available';
         b.currentMatchId = null;
       }
+      let matchPayload = null;
+      if (liveM) {
+        matchPayload = { ...liveM };
+        if (typeof matchPayload.player1 === 'string' && Array.isArray(memoryStore.players)) {
+          matchPayload.player1 = memoryStore.players.find((p) => p._id === matchPayload.player1 || p.playerId === matchPayload.player1) || { fullName: matchPayload.player1 };
+        }
+        if (typeof matchPayload.player2 === 'string' && Array.isArray(memoryStore.players)) {
+          matchPayload.player2 = memoryStore.players.find((p) => p._id === matchPayload.player2 || p.playerId === matchPayload.player2) || { fullName: matchPayload.player2 };
+        }
+      }
       return {
         ...b,
-        currentMatch: liveM || null
+        currentMatch: matchPayload
       };
     });
 

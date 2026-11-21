@@ -887,6 +887,12 @@ exports.getAdminMatches = async (req, res, next) => {
 
     const dynamicMemoryMatches = matches.map((m) => {
       const doc = { ...m };
+      if (typeof doc.player1 === 'string' && Array.isArray(memoryStore.players)) {
+        doc.player1 = memoryStore.players.find((p) => p._id === doc.player1 || p.playerId === doc.player1) || { fullName: doc.player1 };
+      }
+      if (typeof doc.player2 === 'string' && Array.isArray(memoryStore.players)) {
+        doc.player2 = memoryStore.players.find((p) => p._id === doc.player2 || p.playerId === doc.player2) || { fullName: doc.player2 };
+      }
       if (doc.status === 'live' && doc.isClockRunning !== false && doc.lastClockUpdate) {
         const elapsed = Math.max(0, Math.floor((Date.now() - new Date(doc.lastClockUpdate).getTime()) / 1000));
         const turn = doc.activeTurn && doc.activeTurn !== 'none' ? doc.activeTurn : 'white';
