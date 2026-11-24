@@ -154,12 +154,15 @@ const validatePartnerRequest = async (
   category,
   tournamentId,
   allParticipantsByName = null,
-  allTeamsMap = null
+  allTeamsMap = null,
+  requestedPartnerId = null,
+  allParticipantsById = null
 ) => {
   const reqName = sanitizePartnerName(requestedPartnerName);
+  const reqIdStr = requestedPartnerId ? requestedPartnerId.toString() : '';
 
   // 1. No partner requested
-  if (!reqName) {
+  if (!reqName && !reqIdStr) {
     return {
       isValid: false,
       status: 'none',
@@ -171,16 +174,26 @@ const validatePartnerRequest = async (
     };
   }
 
-  // 2. Find partner in participant database by name
+  // 2. Find partner in participant database by ID first, then by name
   let partner = null;
   const cleanName = normalizeText(reqName);
 
-  if (allParticipantsByName) {
-    partner = allParticipantsByName.get(cleanName) || null;
-  } else {
-    partner = await Participant.findOne({
-      fullName: { $regex: new RegExp(`^${cleanName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }
-    });
+  if (reqIdStr) {
+    if (allParticipantsById) {
+      partner = allParticipantsById.get(reqIdStr) || null;
+    } else {
+      partner = await Participant.findById(reqIdStr).lean();
+    }
+  }
+
+  if (!partner && cleanName) {
+    if (allParticipantsByName) {
+      partner = allParticipantsByName.get(cleanName) || null;
+    } else {
+      partner = await Participant.findOne({
+        fullName: { $regex: new RegExp(`^${cleanName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }
+      }).lean();
+    }
   }
 
   // If partner does not exist yet
@@ -362,9 +375,11 @@ const enrichRegistrationsWithValidation = async (registrations, tournamentId) =>
     Team.find({ tournamentId, isApproved: true }).lean()
   ]);
   const participantsByName = new Map();
+  const participantsById = new Map();
 
   participants.forEach((p) => {
     if (p.fullName) participantsByName.set(normalizeText(p.fullName), p);
+    if (p._id) participantsById.set(p._id.toString(), p);
   });
 
   const teamsMap = new Map();
@@ -405,7 +420,9 @@ const enrichRegistrationsWithValidation = async (registrations, tournamentId) =>
           doublesCat,
           tournamentId,
           participantsByName,
-          teamsMap
+          teamsMap,
+          regObj.doublesPartnerId || null,
+          participantsById
         );
       } else {
         regObj.doublesValidation = {
@@ -423,11 +440,13 @@ const enrichRegistrationsWithValidation = async (registrations, tournamentId) =>
         regObj.mixedDoublesValidation = await validatePartnerRequest(
           p,
           cleanMixed,
-          reg.mixedDoublesPartnerStudentId,
+          reg.mixedDoublesPartnerId ? '' : reg.mixedDoublesPartnerStudentId,
           'mixed_doubles',
           tournamentId,
           participantsByName,
-          teamsMap
+          teamsMap,
+          regObj.mixedDoublesPartnerId || null,
+          participantsById
         );
       } else {
         regObj.mixedDoublesValidation = {

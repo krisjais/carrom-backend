@@ -5,6 +5,7 @@ const Team = require('../models/Team');
 const Match = require('../models/Match');
 const AuditLog = require('../models/AuditLog');
 const User = require('../models/User');
+const { emitCarromLive } = require('../socket');
 
 const {
   validatePartnerRequest,
@@ -33,6 +34,210 @@ const normalizeBooleanParticipation = (val, defaultVal = false) => {
   return defaultVal;
 };
 
+// Shared helper: resolves & validates a selected partner against existing Participant records
+const resolveAndValidatePartner = async ({
+  partnerId,
+  partnerName,
+  registrantId = null,
+  registrantName = '',
+  registrantGender,
+  category, // 'boys_doubles' | 'girls_doubles' | 'mixed_doubles'
+  tournamentId,
+  requireExisting = false
+}) => {
+  const cleanName = sanitizePartnerName(partnerName);
+  if (!partnerId && !cleanName) return { partner: null, partnerName: '', partnerId: null };
+
+  let partner = null;
+  if (partnerId) {
+    partner = await Participant.findById(partnerId).lean();
+    if (!partner) {
+      const err = new Error('Selected partner does not exist in registered participants.');
+      err.statusCode = 400;
+      throw err;
+    }
+  } else if (cleanName) {
+    const escaped = cleanName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    partner = await Participant.findOne({ fullName: { $regex: new RegExp(`^${escaped}$`, 'i') } }).lean();
+    if (requireExisting && !partner) {
+      const err = new Error(`Partner "${cleanName}" must be selected from existing registered participants.`);
+      err.statusCode = 400;
+      throw err;
+    }
+  }
+
+  if (!partner) {
+    return { partner: null, partnerName: cleanName, partnerId: null };
+  }
+
+  if (registrantId && partner._id.toString() === registrantId.toString()) {
+    const err = new Error('A participant cannot be selected as their own partner.');
+    err.statusCode = 400;
+    throw err;
+  }
+  if (registrantName && partner.fullName.toLowerCase().trim() === registrantName.toLowerCase().trim()) {
+    const err = new Error('A participant cannot be selected as their own partner.');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  if (category === 'boys_doubles' && (registrantGender !== 'male' || partner.gender !== 'male')) {
+    const err = new Error('Boys Doubles requires both partners to be male.');
+    err.statusCode = 400;
+    throw err;
+  }
+  if (category === 'girls_doubles' && (registrantGender !== 'female' || partner.gender !== 'female')) {
+    const err = new Error('Girls Doubles requires both partners to be female.');
+    err.statusCode = 400;
+    throw err;
+  }
+  if (category === 'mixed_doubles') {
+    const isOpposite =
+      (registrantGender === 'male' && partner.gender === 'female') ||
+      (registrantGender === 'female' && partner.gender === 'male');
+    if (!isOpposite) {
+      const err = new Error('Mixed Doubles requires one male and one female partner.');
+      err.statusCode = 400;
+      throw err;
+    }
+  }
+
+  if (tournamentId) {
+    const existingTeam = await Team.findOne({
+      tournamentId,
+      category,
+      isApproved: true,
+      $or: [{ player1: partner._id }, { player2: partner._id }]
+    }).lean();
+
+    if (
+      existingTeam &&
+      (!registrantId ||
+        (existingTeam.player1?.toString() !== registrantId.toString() &&
+          existingTeam.player2?.toString() !== registrantId.toString()))
+    ) {
+      const err = new Error(
+        `${partner.fullName} is already paired in "${existingTeam.name}" for ${category.replace('_', ' ').toUpperCase()}.`
+      );
+      err.statusCode = 400;
+      throw err;
+    }
+  }
+
+  return {
+    partner,
+    partnerName: partner.fullName,
+    partnerId: partner._id
+  };
+};
+
+// Search existing registered participants eligible as Doubles / Mixed Doubles partners
+const searchPartnerCandidates = async (req, res, next) => {
+  try {
+    const {
+      q = '',
+      category = '',
+      playerGender = '',
+      excludeId = '',
+      tournamentId = ''
+    } = req.query;
+
+    let tournId = tournamentId;
+    if (!tournId) {
+      const activeTourn = await Tournament.findOne().sort({ createdAt: -1 }).lean();
+      if (!activeTourn) {
+        return res.json({ success: true, count: 0, candidates: [] });
+      }
+      tournId = activeTourn._id;
+    }
+
+    // Determine required partner gender based on category and playerGender
+    let requiredGender = '';
+    let targetTeamCategory = category;
+    if (category === 'boys_doubles') {
+      requiredGender = 'male';
+    } else if (category === 'girls_doubles') {
+      requiredGender = 'female';
+    } else if (category === 'doubles') {
+      if (playerGender === 'male' || playerGender === 'female') {
+        requiredGender = playerGender;
+        targetTeamCategory = playerGender === 'male' ? 'boys_doubles' : 'girls_doubles';
+      }
+    } else if (category === 'mixed_doubles') {
+      if (playerGender === 'male') requiredGender = 'female';
+      else if (playerGender === 'female') requiredGender = 'male';
+    }
+
+    const regQuery = { tournamentId: tournId, status: { $ne: 'rejected' } };
+    if (requiredGender) regQuery.gender = requiredGender;
+
+    const [registrations, categoryTeams] = await Promise.all([
+      Registration.find(regQuery).populate('participantId').lean(),
+      targetTeamCategory && ['boys_doubles', 'girls_doubles', 'mixed_doubles'].includes(targetTeamCategory)
+        ? Team.find({ tournamentId: tournId, category: targetTeamCategory, isApproved: true }).lean()
+        : Promise.resolve([])
+    ]);
+
+    // Map participantId -> existing paired team name in target category
+    const pairedTeamMap = new Map();
+    for (const t of categoryTeams) {
+      if (t.player1) pairedTeamMap.set(t.player1.toString(), t.name);
+      if (t.player2) pairedTeamMap.set(t.player2.toString(), t.name);
+    }
+
+    const searchLower = String(q || '').trim().toLowerCase();
+    const excludeStr = excludeId ? String(excludeId).trim() : '';
+    const seenIds = new Set();
+    const candidates = [];
+
+    for (const reg of registrations) {
+      const p = reg.participantId;
+      if (!p || !p._id) continue;
+      const pid = p._id.toString();
+      if (seenIds.has(pid)) continue;
+      if (excludeStr && pid === excludeStr) continue;
+      if (requiredGender && p.gender !== requiredGender) continue;
+
+      if (searchLower) {
+        const matchesName = p.fullName?.toLowerCase().includes(searchLower);
+        const matchesDept = p.department?.toLowerCase().includes(searchLower);
+        const matchesStudentId = p.studentId?.toLowerCase().includes(searchLower);
+        if (!matchesName && !matchesDept && !matchesStudentId) continue;
+      }
+
+      seenIds.add(pid);
+      const pairedTeamName = pairedTeamMap.get(pid) || '';
+
+      candidates.push({
+        _id: p._id,
+        fullName: p.fullName,
+        gender: p.gender,
+        department: p.department,
+        isApproved: Boolean(p.isApproved),
+        registrationStatus: reg.status,
+        participateSingles: reg.participateSingles !== false,
+        participateDoubles: Boolean(reg.participateDoubles),
+        participateMixedDoubles: Boolean(reg.participateMixedDoubles),
+        isAlreadyPaired: Boolean(pairedTeamName),
+        pairedTeamName
+      });
+    }
+
+    candidates.sort((a, b) => {
+      if (a.isAlreadyPaired !== b.isAlreadyPaired) return a.isAlreadyPaired ? 1 : -1;
+      return a.fullName.localeCompare(b.fullName);
+    });
+
+    res.json({
+      success: true,
+      count: candidates.length,
+      candidates
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 // Public / Participant submission
 const submitRegistration = async (req, res, next) => {
   try {
@@ -40,11 +245,14 @@ const submitRegistration = async (req, res, next) => {
       fullName,
       gender,
       department,
+      phone,
       participateSingles,
       participateDoubles,
       participateMixedDoubles,
       doublesPartnerName,
+      doublesPartnerId,
       mixedDoublesPartnerName,
+      mixedDoublesPartnerId,
       tournamentId
     } = req.body;
 
@@ -64,10 +272,10 @@ const submitRegistration = async (req, res, next) => {
       : true;
     let isDoubles = participateDoubles !== undefined
       ? normalizeBooleanParticipation(participateDoubles, false)
-      : !!cleanDoublesPartner;
+      : Boolean(doublesPartnerId || cleanDoublesPartner);
     let isMixed = participateMixedDoubles !== undefined
       ? normalizeBooleanParticipation(participateMixedDoubles, false)
-      : !!cleanMixedPartner;
+      : Boolean(mixedDoublesPartnerId || cleanMixedPartner);
 
     // Validate that at least ONE division is chosen
     if (!isSingles && !isDoubles && !isMixed) {
@@ -78,26 +286,23 @@ const submitRegistration = async (req, res, next) => {
     }
 
     // Partner validation:
-    // If Doubles is chosen, partner is REQUIRED
-    if (isDoubles && !cleanDoublesPartner) {
+    if (isDoubles && !doublesPartnerId && !cleanDoublesPartner) {
       return res.status(400).json({
         success: false,
-        message: `${gender === 'male' ? 'Boys' : 'Girls'} Doubles Partner Full Name is required when participating in Doubles.`
+        message: `${gender === 'male' ? 'Boys' : 'Girls'} Doubles Partner selection is required when participating in Doubles.`
       });
     }
 
-    // If Mixed Doubles is chosen, partner is REQUIRED
-    if (isMixed && !cleanMixedPartner) {
+    if (isMixed && !mixedDoublesPartnerId && !cleanMixedPartner) {
       return res.status(400).json({
         success: false,
-        message: 'Mixed Doubles Partner Full Name is required when participating in Mixed Doubles.'
+        message: 'Mixed Doubles Partner selection is required when participating in Mixed Doubles.'
       });
     }
 
-    const cleanFullName = fullName.trim();
-    const cleanDepartment = department.trim();
-    const finalDoublesPartner = isDoubles ? cleanDoublesPartner : '';
-    const finalMixedPartner = isMixed ? cleanMixedPartner : '';
+    const cleanFullName = fullName.replace(/\s+/g, ' ').trim();
+    const cleanDepartment = department.replace(/\s+/g, ' ').trim();
+    const cleanPhone = String(phone || '').trim();
 
     let tournId = tournamentId;
     if (!tournId) {
@@ -112,10 +317,51 @@ const submitRegistration = async (req, res, next) => {
       return res.status(400).json({ success: false, message: 'Registration for this tournament is currently closed.' });
     }
 
-    // Check duplicate registration
+    // Check duplicate registration first so we have participant._id for self-check
     let participant = await Participant.findOne({
       fullName: { $regex: new RegExp(`^${cleanFullName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }
     });
+
+    const doublesCat = gender === 'male' ? 'boys_doubles' : 'girls_doubles';
+    let resolvedDoubles = { partner: null, partnerName: '', partnerId: null };
+    let resolvedMixed = { partner: null, partnerName: '', partnerId: null };
+
+    try {
+      if (isDoubles) {
+        resolvedDoubles = await resolveAndValidatePartner({
+          partnerId: doublesPartnerId,
+          partnerName: cleanDoublesPartner,
+          registrantId: participant?._id || null,
+          registrantName: cleanFullName,
+          registrantGender: gender,
+          category: doublesCat,
+          tournamentId: tournId,
+          requireExisting: Boolean(doublesPartnerId)
+        });
+      }
+      if (isMixed) {
+        resolvedMixed = await resolveAndValidatePartner({
+          partnerId: mixedDoublesPartnerId,
+          partnerName: cleanMixedPartner,
+          registrantId: participant?._id || null,
+          registrantName: cleanFullName,
+          registrantGender: gender,
+          category: 'mixed_doubles',
+          tournamentId: tournId,
+          requireExisting: Boolean(mixedDoublesPartnerId)
+        });
+      }
+    } catch (valErr) {
+      return res.status(valErr.statusCode || 400).json({
+        success: false,
+        message: valErr.message
+      });
+    }
+
+    const finalDoublesPartner = isDoubles ? resolvedDoubles.partnerName : '';
+    const finalDoublesPartnerId = isDoubles ? resolvedDoubles.partnerId : null;
+    const finalMixedPartner = isMixed ? resolvedMixed.partnerName : '';
+    const finalMixedPartnerId = isMixed ? resolvedMixed.partnerId : null;
 
     if (participant) {
       const existing = await Registration.findOne({
@@ -129,14 +375,19 @@ const submitRegistration = async (req, res, next) => {
           existing.participateDoubles = isDoubles;
           existing.participateMixedDoubles = isMixed;
           if (finalDoublesPartner) existing.doublesPartnerName = finalDoublesPartner;
+          if (finalDoublesPartnerId) existing.doublesPartnerId = finalDoublesPartnerId;
           if (finalMixedPartner) existing.mixedDoublesPartnerName = finalMixedPartner;
+          if (finalMixedPartnerId) existing.mixedDoublesPartnerId = finalMixedPartnerId;
           existing.isAutoCreatedPartner = false;
           await existing.save();
 
           if (cleanDepartment && participant.department !== cleanDepartment) {
             participant.department = cleanDepartment;
-            await participant.save();
           }
+          if (cleanPhone && !participant.phone) {
+            participant.phone = cleanPhone;
+          }
+          await participant.save();
 
           if (isDoubles && finalDoublesPartner) {
             await ensurePartnerRegistration({
@@ -158,6 +409,7 @@ const submitRegistration = async (req, res, next) => {
             });
           }
 
+          emitCarromLive('carrom:roster_updated', { action: 'submit_registration', participantId: participant._id });
           return res.status(200).json({
             success: true,
             code: 'REGISTRATION_SUBMITTED',
@@ -180,7 +432,7 @@ const submitRegistration = async (req, res, next) => {
         studentId: '',
         department: cleanDepartment,
         email: '',
-        phone: '',
+        phone: cleanPhone,
         isApproved: false
       });
     }
@@ -193,11 +445,13 @@ const submitRegistration = async (req, res, next) => {
       participateDoubles: isDoubles,
       participateMixedDoubles: isMixed,
       doublesPartnerName: finalDoublesPartner,
+      doublesPartnerId: finalDoublesPartnerId,
       mixedDoublesPartnerName: finalMixedPartner,
+      mixedDoublesPartnerId: finalMixedPartnerId,
       status: 'pending'
     });
 
-    // Auto-register nominated partner(s) so they do NOT need to register separately!
+    // Link existing partner or register missing legacy partner without creating duplicates
     if (isDoubles && finalDoublesPartner) {
       await ensurePartnerRegistration({
         registrant: participant,
@@ -218,6 +472,7 @@ const submitRegistration = async (req, res, next) => {
       });
     }
 
+    emitCarromLive('carrom:roster_updated', { action: 'submit_registration', participantId: participant._id });
     res.status(201).json({
       success: true,
       code: 'REGISTRATION_SUBMITTED',
@@ -547,6 +802,7 @@ const updateRegistrationStatus = async (req, res, next) => {
       reason: `Admin updated registration status to ${status}.`
     });
 
+    emitCarromLive('carrom:roster_updated', { action: 'update_status', status, registrationId: registration._id });
     res.json({ success: true, message: `Registration ${status} successfully.`, registration });
   } catch (error) {
     next(error);
@@ -566,7 +822,9 @@ const adminEditRegistration = async (req, res, next) => {
       participateDoubles,
       participateMixedDoubles,
       doublesPartnerName,
+      doublesPartnerId,
       mixedDoublesPartnerName,
+      mixedDoublesPartnerId,
       adminNotes
     } = req.body;
 
@@ -575,36 +833,103 @@ const adminEditRegistration = async (req, res, next) => {
       return res.status(404).json({ success: false, message: 'Registration record not found.' });
     }
 
+    const participant = registration.participantId;
+    const prevName = participant?.fullName || '';
+    const nextName = fullName ? fullName.replace(/\s+/g, ' ').trim() : prevName;
+    const doublesCat = (participant?.gender || registration.gender) === 'male' ? 'boys_doubles' : 'girls_doubles';
+
     if (participateSingles !== undefined) registration.participateSingles = !!participateSingles;
     if (participateDoubles !== undefined) registration.participateDoubles = !!participateDoubles;
     if (participateMixedDoubles !== undefined) registration.participateMixedDoubles = !!participateMixedDoubles;
 
-    if (doublesPartnerName !== undefined) {
-      registration.doublesPartnerName = registration.participateDoubles ? sanitizePartnerName(doublesPartnerName) : '';
-    } else if (!registration.participateDoubles) {
+    // Validate & resolve Doubles partner selection if participating
+    if (!registration.participateDoubles) {
       registration.doublesPartnerName = '';
+      registration.doublesPartnerId = null;
+    } else if (doublesPartnerId !== undefined || doublesPartnerName !== undefined) {
+      try {
+        const resolved = await resolveAndValidatePartner({
+          partnerId: doublesPartnerId || null,
+          partnerName: doublesPartnerName || '',
+          registrantId: participant?._id || null,
+          registrantName: nextName,
+          registrantGender: participant?.gender || registration.gender,
+          category: doublesCat,
+          tournamentId: registration.tournamentId,
+          requireExisting: Boolean(doublesPartnerId)
+        });
+        registration.doublesPartnerId = resolved.partnerId;
+        registration.doublesPartnerName = resolved.partnerName;
+      } catch (valErr) {
+        return res.status(valErr.statusCode || 400).json({ success: false, message: valErr.message });
+      }
     }
 
-    if (mixedDoublesPartnerName !== undefined) {
-      registration.mixedDoublesPartnerName = registration.participateMixedDoubles ? sanitizePartnerName(mixedDoublesPartnerName) : '';
-    } else if (!registration.participateMixedDoubles) {
+    // Validate & resolve Mixed Doubles partner selection if participating
+    if (!registration.participateMixedDoubles) {
       registration.mixedDoublesPartnerName = '';
+      registration.mixedDoublesPartnerId = null;
+    } else if (mixedDoublesPartnerId !== undefined || mixedDoublesPartnerName !== undefined) {
+      try {
+        const resolved = await resolveAndValidatePartner({
+          partnerId: mixedDoublesPartnerId || null,
+          partnerName: mixedDoublesPartnerName || '',
+          registrantId: participant?._id || null,
+          registrantName: nextName,
+          registrantGender: participant?.gender || registration.gender,
+          category: 'mixed_doubles',
+          tournamentId: registration.tournamentId,
+          requireExisting: Boolean(mixedDoublesPartnerId)
+        });
+        registration.mixedDoublesPartnerId = resolved.partnerId;
+        registration.mixedDoublesPartnerName = resolved.partnerName;
+      } catch (valErr) {
+        return res.status(valErr.statusCode || 400).json({ success: false, message: valErr.message });
+      }
     }
 
     if (adminNotes !== undefined) registration.adminNotes = adminNotes;
     await registration.save();
 
-    if (registration.participantId) {
-      const p = registration.participantId;
-      if (fullName) p.fullName = fullName.trim();
-      if (department) p.department = department.trim();
-      await p.save();
+    if (participant) {
+      if (fullName) participant.fullName = nextName;
+      if (department) participant.department = department.replace(/\s+/g, ' ').trim();
+      await participant.save();
+
+      // Propagate participant name change across Teams and partner Registrations
+      if (fullName && nextName !== prevName) {
+        const linkedTeams = await Team.find({
+          tournamentId: registration.tournamentId,
+          $or: [{ player1: participant._id }, { player2: participant._id }]
+        }).populate('player1').populate('player2');
+
+        for (const t of linkedTeams) {
+          const updatedName = t.player2
+            ? `${t.player1?.fullName || ''} & ${t.player2?.fullName || ''}`
+            : t.player1?.fullName || nextName;
+          if (t.name !== updatedName) {
+            t.name = updatedName;
+            await t.save();
+          }
+        }
+
+        await Promise.all([
+          Registration.updateMany(
+            { tournamentId: registration.tournamentId, doublesPartnerId: participant._id },
+            { $set: { doublesPartnerName: nextName } }
+          ),
+          Registration.updateMany(
+            { tournamentId: registration.tournamentId, mixedDoublesPartnerId: participant._id },
+            { $set: { mixedDoublesPartnerName: nextName } }
+          )
+        ]);
+      }
     }
 
-    // Auto-register partner(s) if added/edited
-    if (registration.participantId && registration.participateDoubles && registration.doublesPartnerName) {
+    // Auto-link/sync partner(s) if added/edited
+    if (participant && registration.participateDoubles && registration.doublesPartnerName) {
       await ensurePartnerRegistration({
-        registrant: registration.participantId,
+        registrant: participant,
         category: 'doubles',
         partnerName: registration.doublesPartnerName,
         tournamentId: registration.tournamentId,
@@ -612,14 +937,20 @@ const adminEditRegistration = async (req, res, next) => {
       });
     }
 
-    if (registration.participantId && registration.participateMixedDoubles && registration.mixedDoublesPartnerName) {
+    if (participant && registration.participateMixedDoubles && registration.mixedDoublesPartnerName) {
       await ensurePartnerRegistration({
-        registrant: registration.participantId,
+        registrant: participant,
         category: 'mixed_doubles',
         partnerName: registration.mixedDoublesPartnerName,
         tournamentId: registration.tournamentId,
         isApproved: registration.status === 'approved'
       });
+    }
+
+    // Sync Team rosters if this registration is already approved
+    if (registration.status === 'approved') {
+      const { syncAndAutoPairTournamentEntries } = require('../services/partnerValidationEngine');
+      await syncAndAutoPairTournamentEntries(registration.tournamentId);
     }
 
     await AuditLog.create({
@@ -629,13 +960,14 @@ const adminEditRegistration = async (req, res, next) => {
       entityType: 'Registration',
       entityId: registration._id.toString(),
       details: {
-        participant: registration.participantId?.fullName,
-        doublesPartnerName,
-        mixedDoublesPartnerName
+        participant: participant?.fullName,
+        doublesPartnerName: registration.doublesPartnerName,
+        mixedDoublesPartnerName: registration.mixedDoublesPartnerName
       },
       reason: 'Admin modified registration details.'
     });
 
+    emitCarromLive('carrom:roster_updated', { action: 'admin_edit_registration', registrationId: registration._id });
     res.json({
       success: true,
       message: 'Registration updated successfully by admin.',
@@ -688,6 +1020,7 @@ const deleteRegistration = async (req, res, next) => {
       reason: `Admin deleted registration for ${participantName}.`
     });
 
+    emitCarromLive('carrom:roster_updated', { action: 'delete_registration', registrationId: id });
     res.json({
       success: true,
       message: `Registration for ${participantName} deleted successfully.`
@@ -772,6 +1105,7 @@ const bulkDeleteRegistrations = async (req, res, next) => {
       });
     }
 
+    emitCarromLive('carrom:roster_updated', { action: 'bulk_delete', deletedCount: count });
     res.json({
       success: true,
       message: `Successfully deleted ${count} participant registration(s).`,
@@ -1142,6 +1476,7 @@ const importParticipants = async (req, res, next) => {
       });
     }
 
+    emitCarromLive('carrom:roster_updated', { action: 'import_participants', imported: imported.length });
     res.json({
       success: true,
       message: `Import complete: ${imported.length} players imported, ${skipped.length} duplicates skipped, ${errors.length} rejected.`,
@@ -1167,14 +1502,17 @@ const adminAddPlayer = async (req, res, next) => {
       fullName,
       gender,
       department,
+      phone,
       participateSingles,
       participateDoubles,
       participateMixedDoubles,
       boysDoublesPartner,
       girlsDoublesPartner,
       doublesPartnerName,
+      doublesPartnerId,
       mixedDoublesPartnerName,
       mixedDoublesPartner,
+      mixedDoublesPartnerId,
       tournamentId
     } = req.body;
 
@@ -1187,6 +1525,7 @@ const adminAddPlayer = async (req, res, next) => {
 
     const cleanName = fullName.replace(/\s+/g, ' ').trim();
     const cleanDept = department.replace(/\s+/g, ' ').trim();
+    const cleanPhone = String(phone || '').trim();
     const gLower = gender.toLowerCase().trim();
     let normalizedGender = '';
     if (['m', 'male', 'boy', 'boys'].includes(gLower)) normalizedGender = 'male';
@@ -1205,16 +1544,13 @@ const adminAddPlayer = async (req, res, next) => {
 
     let isDoubles = participateDoubles !== undefined
       ? normalizeBooleanParticipation(participateDoubles, false)
-      : !!candidateDoubles;
+      : Boolean(doublesPartnerId || candidateDoubles);
     let isMixed = participateMixedDoubles !== undefined
       ? normalizeBooleanParticipation(participateMixedDoubles, false)
-      : !!candidateMixed;
+      : Boolean(mixedDoublesPartnerId || candidateMixed);
     let isSingles = participateSingles !== undefined
       ? normalizeBooleanParticipation(participateSingles, true)
       : true;
-
-    let assignedDoubles = isDoubles ? candidateDoubles : '';
-    let assignedMixed = isMixed ? candidateMixed : '';
 
     if (!isSingles && !isDoubles && !isMixed) {
       return res.status(400).json({
@@ -1238,6 +1574,44 @@ const adminAddPlayer = async (req, res, next) => {
       fullName: { $regex: new RegExp(`^${escapedName}$`, 'i') }
     });
 
+    const doublesCat = normalizedGender === 'male' ? 'boys_doubles' : 'girls_doubles';
+    let resolvedDoubles = { partner: null, partnerName: '', partnerId: null };
+    let resolvedMixed = { partner: null, partnerName: '', partnerId: null };
+
+    try {
+      if (isDoubles) {
+        resolvedDoubles = await resolveAndValidatePartner({
+          partnerId: doublesPartnerId,
+          partnerName: candidateDoubles,
+          registrantId: participant?._id || null,
+          registrantName: cleanName,
+          registrantGender: normalizedGender,
+          category: doublesCat,
+          tournamentId: tournId,
+          requireExisting: Boolean(doublesPartnerId)
+        });
+      }
+      if (isMixed) {
+        resolvedMixed = await resolveAndValidatePartner({
+          partnerId: mixedDoublesPartnerId,
+          partnerName: candidateMixed,
+          registrantId: participant?._id || null,
+          registrantName: cleanName,
+          registrantGender: normalizedGender,
+          category: 'mixed_doubles',
+          tournamentId: tournId,
+          requireExisting: Boolean(mixedDoublesPartnerId)
+        });
+      }
+    } catch (valErr) {
+      return res.status(valErr.statusCode || 400).json({ success: false, message: valErr.message });
+    }
+
+    const assignedDoubles = isDoubles ? resolvedDoubles.partnerName : '';
+    const assignedDoublesId = isDoubles ? resolvedDoubles.partnerId : null;
+    const assignedMixed = isMixed ? resolvedMixed.partnerName : '';
+    const assignedMixedId = isMixed ? resolvedMixed.partnerId : null;
+
     if (participant) {
       const existingReg = await Registration.findOne({
         participantId: participant._id,
@@ -1257,7 +1631,9 @@ const adminAddPlayer = async (req, res, next) => {
         existingReg.participateDoubles = isDoubles;
         existingReg.participateMixedDoubles = isMixed;
         existingReg.doublesPartnerName = assignedDoubles;
+        existingReg.doublesPartnerId = assignedDoublesId;
         existingReg.mixedDoublesPartnerName = assignedMixed;
+        existingReg.mixedDoublesPartnerId = assignedMixedId;
         if (normalizedGender) existingReg.gender = normalizedGender;
         await existingReg.save();
 
@@ -1301,7 +1677,9 @@ const adminAddPlayer = async (req, res, next) => {
           participateDoubles: isDoubles,
           participateMixedDoubles: isMixed,
           doublesPartnerName: assignedDoubles,
+          doublesPartnerId: assignedDoublesId,
           mixedDoublesPartnerName: assignedMixed,
+          mixedDoublesPartnerId: assignedMixedId,
           status: 'pending'
         });
 
@@ -1345,7 +1723,7 @@ const adminAddPlayer = async (req, res, next) => {
       studentId: '',
       department: cleanDept,
       email: '',
-      phone: '',
+      phone: cleanPhone,
       isApproved: false
     });
 
@@ -1357,7 +1735,9 @@ const adminAddPlayer = async (req, res, next) => {
       participateDoubles: isDoubles,
       participateMixedDoubles: isMixed,
       doublesPartnerName: assignedDoubles,
+      doublesPartnerId: assignedDoublesId,
       mixedDoublesPartnerName: assignedMixed,
+      mixedDoublesPartnerId: assignedMixedId,
       status: 'pending'
     });
 
@@ -1398,6 +1778,7 @@ const adminAddPlayer = async (req, res, next) => {
       });
     }
 
+    emitCarromLive('carrom:roster_updated', { action: 'admin_add_player', participantId: participant._id });
     res.json({
       success: true,
       message: `Player "${cleanName}" added successfully.`,
@@ -1415,6 +1796,7 @@ const { seedBreakdownData } = require('../services/breakdownSeedService');
 const seedBreakdown = async (req, res, next) => {
   try {
     const summary = await seedBreakdownData(req.user);
+    emitCarromLive('carrom:roster_updated', { action: 'seed_breakdown' });
     res.json({
       success: true,
       message: `Seeded ${summary.uniqueParticipants.total} participants and ${summary.teams.total} approved category entries.`,
@@ -1426,6 +1808,7 @@ const seedBreakdown = async (req, res, next) => {
 };
 
 module.exports = {
+  searchPartnerCandidates,
   submitRegistration,
   lookupRegistrationByStudentId,
   getAllRegistrations,

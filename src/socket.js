@@ -97,6 +97,7 @@ function emitMatchUpdate(matchId, event, data) {
 function emitCarromLive(event, data) {
   if (!io) return;
   io.to('carrom_live').emit(event, data);
+  io.emit(event, data);
 }
 
 /**

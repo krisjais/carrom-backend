@@ -3,6 +3,7 @@ const Participant = require('../models/Participant');
 const Tournament = require('../models/Tournament');
 const Registration = require('../models/Registration');
 const AuditLog = require('../models/AuditLog');
+const { emitCarromLive } = require('../socket');
 
 // Get teams with optional category filter
 const getTeams = async (req, res, next) => {
@@ -121,13 +122,31 @@ const createDoublesPair = async (req, res, next) => {
       isApproved: true
     });
 
-    // Ensure both participants' registrations reflect enrollment in this category
+    // Ensure both participants' registrations reflect enrollment & linked partner in this category
     const isMixed = category === 'mixed_doubles';
-    const updateField = isMixed ? { participateMixedDoubles: true } : { participateDoubles: true };
-    await Registration.updateMany(
-      { participantId: { $in: [player1._id, player2._id] }, tournamentId: tournId },
-      { $set: updateField }
-    );
+    if (isMixed) {
+      await Promise.all([
+        Registration.updateOne(
+          { participantId: player1._id, tournamentId: tournId },
+          { $set: { participateMixedDoubles: true, mixedDoublesPartnerId: player2._id, mixedDoublesPartnerName: player2.fullName } }
+        ),
+        Registration.updateOne(
+          { participantId: player2._id, tournamentId: tournId },
+          { $set: { participateMixedDoubles: true, mixedDoublesPartnerId: player1._id, mixedDoublesPartnerName: player1.fullName } }
+        )
+      ]);
+    } else {
+      await Promise.all([
+        Registration.updateOne(
+          { participantId: player1._id, tournamentId: tournId },
+          { $set: { participateDoubles: true, doublesPartnerId: player2._id, doublesPartnerName: player2.fullName } }
+        ),
+        Registration.updateOne(
+          { participantId: player2._id, tournamentId: tournId },
+          { $set: { participateDoubles: true, doublesPartnerId: player1._id, doublesPartnerName: player1.fullName } }
+        )
+      ]);
+    }
 
     await AuditLog.create({
       action: 'CREATE_DOUBLES_TEAM',
@@ -139,7 +158,8 @@ const createDoublesPair = async (req, res, next) => {
       reason: `Admin created and approved doubles team in ${category}`
     });
 
-    const populatedTeam = await Team.findById(team._id).populate('player1').populate('player2');
+    const populatedTeam = await Team.findById(team._id).populate('player1').populate('player2').lean();
+    emitCarromLive('carrom:roster_updated', { category, action: 'create_pair', teamId: team._id });
 
     res.status(201).json({
       success: true,
@@ -190,6 +210,7 @@ const deleteTeam = async (req, res, next) => {
       });
     }
 
+    emitCarromLive('carrom:roster_updated', { category: team.category, action: 'delete_team', teamId: id });
     res.json({ success: true, message: `Team "${team.name}" removed successfully.` });
   } catch (error) {
     next(error);
@@ -292,6 +313,7 @@ const autoPopulateTeams = async (req, res, next) => {
       });
     }
 
+    emitCarromLive('carrom:roster_updated', { category: category || 'all', action: 'auto_populate', createdCount });
     res.json({
       success: true,
       message: `Roster synced successfully! Added ${createdCount} new team entries from approved registrations.`,
@@ -302,7 +324,7 @@ const autoPopulateTeams = async (req, res, next) => {
   }
 };
 
-// Admin: Update a team's name, partner, or players
+// Admin: Update a team's players (strictly linked to existing registered participants)
 const updateTeam = async (req, res, next) => {
   try {
     const { id } = req.params;
@@ -310,8 +332,6 @@ const updateTeam = async (req, res, next) => {
       name,
       player1Id,
       player2Id,
-      rawPartnerName,
-      customPartnerName,
       replacePlayerId,
       newParticipantId,
       reason
@@ -323,64 +343,126 @@ const updateTeam = async (req, res, next) => {
     }
 
     const oldName = team.name;
+    const isDoublesCategory = ['boys_doubles', 'girls_doubles', 'mixed_doubles'].includes(team.category);
 
-    // Handle replacePlayerId (swap specific player slot)
+    let nextPlayer1Id = team.player1?._id?.toString() || team.player1?.toString() || null;
+    let nextPlayer2Id = team.player2?._id?.toString() || team.player2?.toString() || null;
+
     if (replacePlayerId && newParticipantId) {
-      const newP = await Participant.findById(newParticipantId);
-      if (!newP) {
-        return res.status(404).json({ success: false, message: 'Replacement participant not found.' });
-      }
-      if (team.player1 && team.player1._id.toString() === replacePlayerId.toString()) {
-        team.player1 = newP._id;
-      } else if (team.player2 && team.player2._id.toString() === replacePlayerId.toString()) {
-        team.player2 = newP._id;
+      if (nextPlayer1Id === replacePlayerId.toString()) {
+        nextPlayer1Id = newParticipantId.toString();
+      } else if (nextPlayer2Id === replacePlayerId.toString()) {
+        nextPlayer2Id = newParticipantId.toString();
       } else {
-        // default to replacing partner (player2)
-        team.player2 = newP._id;
+        nextPlayer2Id = newParticipantId.toString();
       }
-    } else if (newParticipantId) {
-      // Replaces partner (player2) by default
-      const newP = await Participant.findById(newParticipantId);
-      if (!newP) {
-        return res.status(404).json({ success: false, message: 'Replacement participant not found.' });
-      }
-      team.player2 = newP._id;
-    }
-
-    if (player1Id) {
-      const p1 = await Participant.findById(player1Id);
-      if (p1) team.player1 = p1._id;
-    }
-
-    if (player2Id !== undefined) {
-      if (player2Id) {
-        const p2 = await Participant.findById(player2Id);
-        if (p2) team.player2 = p2._id;
+    } else if (newParticipantId && !player1Id && player2Id === undefined) {
+      if (isDoublesCategory) {
+        nextPlayer2Id = newParticipantId.toString();
       } else {
-        team.player2 = null;
+        nextPlayer1Id = newParticipantId.toString();
       }
     }
 
-    if (rawPartnerName !== undefined || customPartnerName !== undefined) {
-      team.rawPartnerName = (customPartnerName || rawPartnerName || '').trim();
+    if (player1Id) nextPlayer1Id = player1Id.toString();
+    if (player2Id !== undefined) nextPlayer2Id = player2Id ? player2Id.toString() : null;
+
+    if (!nextPlayer1Id) {
+      return res.status(400).json({ success: false, message: 'Primary player is required.' });
+    }
+    if (isDoublesCategory && !nextPlayer2Id) {
+      return res.status(400).json({ success: false, message: 'Both players are required for a doubles team.' });
+    }
+    if (isDoublesCategory && nextPlayer1Id === nextPlayer2Id) {
+      return res.status(400).json({ success: false, message: 'A participant cannot be paired with themselves.' });
     }
 
-    // Determine final team name
-    if (name && name.trim()) {
-      team.name = name.trim();
-    } else {
-      await team.populate('player1');
-      await team.populate('player2');
-      if (team.player1 && team.player2) {
-        team.name = `${team.player1.fullName} & ${team.player2.fullName}`;
-      } else if (team.player1 && team.rawPartnerName) {
-        team.name = `${team.player1.fullName} & ${team.rawPartnerName}`;
-      } else if (team.player1) {
-        team.name = team.player1.fullName;
+    const [p1, p2] = await Promise.all([
+      Participant.findById(nextPlayer1Id),
+      nextPlayer2Id ? Participant.findById(nextPlayer2Id) : Promise.resolve(null)
+    ]);
+
+    if (!p1 || (isDoublesCategory && !p2)) {
+      return res.status(404).json({ success: false, message: 'Selected participant record was not found.' });
+    }
+
+    // Enforce category gender rules
+    if (team.category === 'boys_singles' && p1.gender !== 'male') {
+      return res.status(400).json({ success: false, message: 'Boys Singles requires a male participant.' });
+    }
+    if (team.category === 'girls_singles' && p1.gender !== 'female') {
+      return res.status(400).json({ success: false, message: 'Girls Singles requires a female participant.' });
+    }
+    if (team.category === 'boys_doubles' && (p1.gender !== 'male' || p2.gender !== 'male')) {
+      return res.status(400).json({ success: false, message: 'Both players in Boys Doubles must be male.' });
+    }
+    if (team.category === 'girls_doubles' && (p1.gender !== 'female' || p2.gender !== 'female')) {
+      return res.status(400).json({ success: false, message: 'Both players in Girls Doubles must be female.' });
+    }
+    if (team.category === 'mixed_doubles') {
+      const hasMale = p1.gender === 'male' || p2.gender === 'male';
+      const hasFemale = p1.gender === 'female' || p2.gender === 'female';
+      if (!hasMale || !hasFemale) {
+        return res.status(400).json({ success: false, message: 'Mixed Doubles requires exactly one male and one female participant.' });
       }
     }
+
+    // Prevent duplicate team assignment in the same category
+    const playerIdsToCheck = [p1._id, p2?._id].filter(Boolean);
+    const conflictTeam = await Team.findOne({
+      _id: { $ne: team._id },
+      tournamentId: team.tournamentId,
+      category: team.category,
+      $or: [
+        { player1: { $in: playerIdsToCheck } },
+        { player2: { $in: playerIdsToCheck } }
+      ]
+    }).lean();
+
+    if (conflictTeam) {
+      return res.status(400).json({
+        success: false,
+        message: `Duplicate assignment prevented: A selected participant is already assigned to team "${conflictTeam.name}" in ${team.category.replace('_', ' ').toUpperCase()}.`
+      });
+    }
+
+    team.player1 = p1._id;
+    team.player2 = p2 ? p2._id : null;
+    team.rawPartnerName = '';
+    team.name = name && name.trim()
+      ? name.trim()
+      : p2
+      ? `${p1.fullName} & ${p2.fullName}`
+      : p1.fullName;
 
     await team.save();
+
+    // Keep linked Registration records in sync with the updated team pairing
+    if (isDoublesCategory && p2) {
+      if (team.category === 'mixed_doubles') {
+        await Promise.all([
+          Registration.updateOne(
+            { participantId: p1._id, tournamentId: team.tournamentId },
+            { $set: { participateMixedDoubles: true, mixedDoublesPartnerId: p2._id, mixedDoublesPartnerName: p2.fullName } }
+          ),
+          Registration.updateOne(
+            { participantId: p2._id, tournamentId: team.tournamentId },
+            { $set: { participateMixedDoubles: true, mixedDoublesPartnerId: p1._id, mixedDoublesPartnerName: p1.fullName } }
+          )
+        ]);
+      } else {
+        await Promise.all([
+          Registration.updateOne(
+            { participantId: p1._id, tournamentId: team.tournamentId },
+            { $set: { participateDoubles: true, doublesPartnerId: p2._id, doublesPartnerName: p2.fullName } }
+          ),
+          Registration.updateOne(
+            { participantId: p2._id, tournamentId: team.tournamentId },
+            { $set: { participateDoubles: true, doublesPartnerId: p1._id, doublesPartnerName: p1.fullName } }
+          )
+        ]);
+      }
+    }
 
     if (req.user) {
       await AuditLog.create({
@@ -392,14 +474,14 @@ const updateTeam = async (req, res, next) => {
         details: {
           category: team.category,
           oldName,
-          newName: team.name,
-          rawPartnerName: team.rawPartnerName
+          newName: team.name
         },
-        reason: reason || `Admin updated team/substituted partner: "${oldName}" -> "${team.name}"`
+        reason: reason || `Admin updated team/partner: "${oldName}" -> "${team.name}"`
       });
     }
 
-    const updatedTeam = await Team.findById(team._id).populate('player1').populate('player2');
+    const updatedTeam = await Team.findById(team._id).populate('player1').populate('player2').lean();
+    emitCarromLive('carrom:roster_updated', { category: team.category, action: 'update_team', teamId: team._id });
 
     res.json({
       success: true,

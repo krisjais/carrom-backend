@@ -164,6 +164,26 @@ const seedBreakdownData = async (actor = null) => {
     participantMap.set(doc.fullName, doc);
   });
 
+  // Map verified mutual partner IDs so registrations link directly to canonical Participant _id
+  const mutualDoublesIdMap = new Map();
+  for (const [n1, n2] of [...MUTUAL_BOYS_DOUBLES_PAIRS, ...MUTUAL_GIRLS_DOUBLES_PAIRS]) {
+    const p1 = participantMap.get(n1);
+    const p2 = participantMap.get(n2);
+    if (p1 && p2) {
+      mutualDoublesIdMap.set(n1, p2._id);
+      mutualDoublesIdMap.set(n2, p1._id);
+    }
+  }
+  const mutualMixedIdMap = new Map();
+  for (const [n1, n2] of MUTUAL_MIXED_DOUBLES_PAIRS) {
+    const p1 = participantMap.get(n1);
+    const p2 = participantMap.get(n2);
+    if (p1 && p2) {
+      mutualMixedIdMap.set(n1, p2._id);
+      mutualMixedIdMap.set(n2, p1._id);
+    }
+  }
+
   await Registration.insertMany(
     PARTICIPANTS_DATA.map((entry) => ({
       participantId: participantMap.get(entry.fullName)._id,
@@ -173,7 +193,9 @@ const seedBreakdownData = async (actor = null) => {
       participateDoubles: entry.participateDoubles,
       participateMixedDoubles: entry.participateMixedDoubles,
       doublesPartnerName: entry.doublesPartnerName,
+      doublesPartnerId: mutualDoublesIdMap.get(entry.fullName) || null,
       mixedDoublesPartnerName: entry.mixedDoublesPartnerName,
+      mixedDoublesPartnerId: mutualMixedIdMap.get(entry.fullName) || null,
       status: 'approved'
     }))
   );

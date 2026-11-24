@@ -34,6 +34,11 @@ const registrationSchema = new mongoose.Schema(
       default: '',
       trim: true
     },
+    doublesPartnerId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Participant',
+      default: null
+    },
     doublesPartnerStudentId: {
       type: String,
       default: '',
@@ -44,6 +49,11 @@ const registrationSchema = new mongoose.Schema(
       type: String,
       default: '',
       trim: true
+    },
+    mixedDoublesPartnerId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Participant',
+      default: null
     },
     mixedDoublesPartnerStudentId: {
       type: String,

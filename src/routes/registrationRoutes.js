@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const {
+  searchPartnerCandidates,
   submitRegistration,
   lookupRegistrationByStudentId,
   getAllRegistrations,
@@ -17,6 +18,7 @@ const {
 const { authRequired, adminOnly } = require('../middleware/auth');
 
 // Public endpoints
+router.get('/partners/search', searchPartnerCandidates);
 router.post('/', submitRegistration);
 router.get('/lookup/:query', lookupRegistrationByStudentId);
 
