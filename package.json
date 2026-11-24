@@ -7,6 +7,7 @@
     "start": "node server.js",
     "dev": "node --watch server.js",
     "seed": "node src/utils/seedData.js",
+    "seed:breakdown": "node src/utils/seedBreakdownData.js",
     "clear": "node src/utils/clearData.js"
   },
   "dependencies": {
