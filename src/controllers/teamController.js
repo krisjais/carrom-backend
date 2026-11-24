@@ -21,7 +21,8 @@ const getTeams = async (req, res, next) => {
     const teams = await Team.find(query)
       .populate('player1')
       .populate('player2')
-      .sort({ category: 1, name: 1 });
+      .sort({ category: 1, name: 1 })
+      .lean();
 
     res.json({ success: true, count: teams.length, teams });
   } catch (error) {

@@ -11,7 +11,8 @@ const {
   bulkDeleteRegistrations,
   getValidationSummary,
   importParticipants,
-  adminAddPlayer
+  adminAddPlayer,
+  seedBreakdown
 } = require('../controllers/registrationController');
 const { authRequired, adminOnly } = require('../middleware/auth');
 
@@ -25,6 +26,7 @@ router.get('/validation-summary', authRequired, adminOnly, getValidationSummary)
 router.get('/my', authRequired, getMyRegistration);
 router.post('/add-player', authRequired, adminOnly, adminAddPlayer);
 router.post('/import', authRequired, adminOnly, importParticipants);
+router.post('/seed-breakdown', authRequired, adminOnly, seedBreakdown);
 router.put('/:id/status', authRequired, adminOnly, updateRegistrationStatus);
 router.put('/:id/admin-edit', authRequired, adminOnly, adminEditRegistration);
 router.delete('/bulk-clear', authRequired, adminOnly, bulkDeleteRegistrations);

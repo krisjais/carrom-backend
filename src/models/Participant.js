@@ -45,4 +45,7 @@ const participantSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+participantSchema.index({ gender: 1 });
+participantSchema.index({ fullName: 1 });
+
 module.exports = mongoose.model('Participant', participantSchema);

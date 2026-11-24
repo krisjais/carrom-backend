@@ -19,28 +19,43 @@ const getCurrentTournament = async (req, res, next) => {
       });
     }
 
-    // Category summary statistics
+    // Category summary statistics via batched aggregations
     const categories = ['boys_singles', 'girls_singles', 'boys_doubles', 'girls_doubles', 'mixed_doubles'];
+    const [teamAgg, matchAgg, totalRegistrations, pendingRegistrations] = await Promise.all([
+      Team.aggregate([
+        { $match: { tournamentId: tournament._id, isApproved: true } },
+        { $group: { _id: '$category', count: { $sum: 1 } } }
+      ]),
+      Match.aggregate([
+        { $match: { tournamentId: tournament._id } },
+        {
+          $group: {
+            _id: '$category',
+            matchesCount: { $sum: 1 },
+            completedMatches: { $sum: { $cond: [{ $eq: ['$status', 'completed'] }, 1, 0] } },
+            liveMatches: { $sum: { $cond: [{ $eq: ['$status', 'live'] }, 1, 0] } }
+          }
+        }
+      ]),
+      Registration.countDocuments({ tournamentId: tournament._id }),
+      Registration.countDocuments({ tournamentId: tournament._id, status: 'pending' })
+    ]);
+
+    const teamMap = new Map(teamAgg.map((t) => [t._id, t.count]));
+    const matchMap = new Map(matchAgg.map((m) => [m._id, m]));
     const categoryStats = {};
 
     for (const cat of categories) {
-      const teamsCount = await Team.countDocuments({ tournamentId: tournament._id, category: cat, isApproved: true });
-      const matchesCount = await Match.countDocuments({ tournamentId: tournament._id, category: cat });
-      const completedMatches = await Match.countDocuments({ tournamentId: tournament._id, category: cat, status: 'completed' });
-      const liveMatches = await Match.countDocuments({ tournamentId: tournament._id, category: cat, status: 'live' });
-
+      const m = matchMap.get(cat) || { matchesCount: 0, completedMatches: 0, liveMatches: 0 };
       categoryStats[cat] = {
-        teamsCount,
-        matchesCount,
-        completedMatches,
-        liveMatches,
+        teamsCount: teamMap.get(cat) || 0,
+        matchesCount: m.matchesCount,
+        completedMatches: m.completedMatches,
+        liveMatches: m.liveMatches,
         isDrawPublished: tournament.drawsPublished ? Boolean(tournament.drawsPublished[cat]) : false,
         isDrawLocked: tournament.drawsLocked ? Boolean(tournament.drawsLocked[cat]) : false
       };
     }
-
-    const totalRegistrations = await Registration.countDocuments({ tournamentId: tournament._id });
-    const pendingRegistrations = await Registration.countDocuments({ tournamentId: tournament._id, status: 'pending' });
 
     res.json({
       success: true,

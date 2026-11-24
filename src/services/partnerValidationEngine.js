@@ -357,14 +357,16 @@ const enrichRegistrationsWithValidation = async (registrations, tournamentId) =>
   if (!registrations || registrations.length === 0) return [];
 
   // Pre-fetch all participants and teams for batch lookup
-  const participants = await Participant.find();
+  const [participants, teams] = await Promise.all([
+    Participant.find().lean(),
+    Team.find({ tournamentId, isApproved: true }).lean()
+  ]);
   const participantsByName = new Map();
 
   participants.forEach((p) => {
     if (p.fullName) participantsByName.set(normalizeText(p.fullName), p);
   });
 
-  const teams = await Team.find({ tournamentId, isApproved: true });
   const teamsMap = new Map();
   ['boys_doubles', 'girls_doubles', 'mixed_doubles'].forEach((cat) => {
     teamsMap.set(`${tournamentId}_${cat}`, teams.filter((t) => t.category === cat));
@@ -551,12 +553,29 @@ const syncAndAutoPairTournamentEntries = async (tournamentId, category = null) =
     tournId = activeTourn._id;
   }
 
-  const approvedRegistrations = await Registration.find({
-    tournamentId: tournId,
-    status: 'approved'
-  }).populate('participantId');
+  const [approvedRegistrations, existingTeams] = await Promise.all([
+    Registration.find({
+      tournamentId: tournId,
+      status: 'approved'
+    })
+      .populate('participantId')
+      .lean(),
+    Team.find({ tournamentId: tournId }).lean()
+  ]);
 
-  let createdCount = 0;
+  const singlesPlayersByCat = new Map();
+  const teamMemberKeys = new Set();
+  for (const t of existingTeams) {
+    if (t.category === 'boys_singles' || t.category === 'girls_singles') {
+      if (!singlesPlayersByCat.has(t.category)) singlesPlayersByCat.set(t.category, new Set());
+      if (t.player1) singlesPlayersByCat.get(t.category).add(t.player1.toString());
+    } else {
+      if (t.player1) teamMemberKeys.add(`${t.category}:${t.player1.toString()}`);
+      if (t.player2) teamMemberKeys.add(`${t.category}:${t.player2.toString()}`);
+    }
+  }
+
+  const teamsToInsert = [];
 
   // 1. Sync Singles Entries ONLY for participants who opted into Singles
   for (const reg of approvedRegistrations) {
@@ -569,14 +588,13 @@ const syncAndAutoPairTournamentEntries = async (tournamentId, category = null) =
     const singlesCat = p.gender === 'male' ? 'boys_singles' : 'girls_singles';
 
     if (!category || category === singlesCat) {
-      const existingSingles = await Team.findOne({
-        tournamentId: tournId,
-        category: singlesCat,
-        player1: p._id
-      });
+      const catSet = singlesPlayersByCat.get(singlesCat) || new Set();
+      const pId = p._id.toString();
 
-      if (!existingSingles) {
-        await Team.create({
+      if (!catSet.has(pId)) {
+        catSet.add(pId);
+        singlesPlayersByCat.set(singlesCat, catSet);
+        teamsToInsert.push({
           name: p.fullName,
           tournamentId: tournId,
           category: singlesCat,
@@ -584,7 +602,6 @@ const syncAndAutoPairTournamentEntries = async (tournamentId, category = null) =
           player2: null,
           isApproved: true
         });
-        createdCount++;
       }
     }
   }
@@ -592,6 +609,10 @@ const syncAndAutoPairTournamentEntries = async (tournamentId, category = null) =
   // 2. Sync Doubles & Mixed Doubles Teams (Only if both participants opted in & nominated each other)
   if (!category || category.includes('doubles')) {
     const enriched = await enrichRegistrationsWithValidation(approvedRegistrations, tournId);
+    const regByParticipantId = new Map();
+    for (const r of enriched) {
+      if (r.participantId?._id) regByParticipantId.set(r.participantId._id.toString(), r);
+    }
 
     for (const reg of enriched) {
       const p1 = reg.participantId;
@@ -607,33 +628,30 @@ const syncAndAutoPairTournamentEntries = async (tournamentId, category = null) =
         const p2 = reg.doublesValidation.partner;
         const doublesCat = p1.gender === 'male' ? 'boys_doubles' : 'girls_doubles';
 
-        // Check if partner p2 also opted into doubles
-        const p2Reg = enriched.find((r) => r.participantId?._id?.toString() === p2._id?.toString());
+        const p2Reg = regByParticipantId.get(p2._id.toString());
         const p2ParticipatesDoubles = p2Reg?.participateDoubles !== undefined ? p2Reg.participateDoubles : true;
 
-        if (p2ParticipatesDoubles && (!category || category === doublesCat) && p1.gender === p2.gender && p1._id.toString() !== p2._id.toString()) {
-          const existingTeam = await Team.findOne({
+        const key1 = `${doublesCat}:${p1._id.toString()}`;
+        const key2 = `${doublesCat}:${p2._id.toString()}`;
+
+        if (
+          p2ParticipatesDoubles &&
+          (!category || category === doublesCat) &&
+          p1.gender === p2.gender &&
+          p1._id.toString() !== p2._id.toString() &&
+          !teamMemberKeys.has(key1) &&
+          !teamMemberKeys.has(key2)
+        ) {
+          teamMemberKeys.add(key1);
+          teamMemberKeys.add(key2);
+          teamsToInsert.push({
+            name: `${p1.fullName} & ${p2.fullName}`,
             tournamentId: tournId,
             category: doublesCat,
-            $or: [
-              { player1: p1._id },
-              { player2: p1._id },
-              { player1: p2._id },
-              { player2: p2._id }
-            ]
+            player1: p1._id,
+            player2: p2._id,
+            isApproved: true
           });
-
-          if (!existingTeam) {
-            await Team.create({
-              name: `${p1.fullName} & ${p2.fullName}`,
-              tournamentId: tournId,
-              category: doublesCat,
-              player1: p1._id,
-              player2: p2._id,
-              isApproved: true
-            });
-            createdCount++;
-          }
         }
       }
 
@@ -649,39 +667,39 @@ const syncAndAutoPairTournamentEntries = async (tournamentId, category = null) =
           (p1.gender === 'male' && p2.gender === 'female') ||
           (p1.gender === 'female' && p2.gender === 'male');
 
-        // Check if partner p2 also opted into mixed doubles
-        const p2Reg = enriched.find((r) => r.participantId?._id?.toString() === p2._id?.toString());
+        const p2Reg = regByParticipantId.get(p2._id.toString());
         const p2ParticipatesMixed = p2Reg?.participateMixedDoubles !== undefined ? p2Reg.participateMixedDoubles : true;
 
-        if (p2ParticipatesMixed && isMixedGenders && p1._id.toString() !== p2._id.toString()) {
-          const existingMixed = await Team.findOne({
+        const key1 = `mixed_doubles:${p1._id.toString()}`;
+        const key2 = `mixed_doubles:${p2._id.toString()}`;
+
+        if (
+          p2ParticipatesMixed &&
+          isMixedGenders &&
+          p1._id.toString() !== p2._id.toString() &&
+          !teamMemberKeys.has(key1) &&
+          !teamMemberKeys.has(key2)
+        ) {
+          teamMemberKeys.add(key1);
+          teamMemberKeys.add(key2);
+          teamsToInsert.push({
+            name: `${p1.fullName} & ${p2.fullName}`,
             tournamentId: tournId,
             category: 'mixed_doubles',
-            $or: [
-              { player1: p1._id },
-              { player2: p1._id },
-              { player1: p2._id },
-              { player2: p2._id }
-            ]
+            player1: p1._id,
+            player2: p2._id,
+            isApproved: true
           });
-
-          if (!existingMixed) {
-            await Team.create({
-              name: `${p1.fullName} & ${p2.fullName}`,
-              tournamentId: tournId,
-              category: 'mixed_doubles',
-              player1: p1._id,
-              player2: p2._id,
-              isApproved: true
-            });
-            createdCount++;
-          }
         }
       }
     }
   }
 
-  return { success: true, createdCount };
+  if (teamsToInsert.length > 0) {
+    await Team.insertMany(teamsToInsert);
+  }
+
+  return { success: true, createdCount: teamsToInsert.length };
 };
 
 module.exports = {

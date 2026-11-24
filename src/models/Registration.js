@@ -69,5 +69,6 @@ const registrationSchema = new mongoose.Schema(
 );
 
 registrationSchema.index({ participantId: 1, tournamentId: 1 }, { unique: true });
+registrationSchema.index({ tournamentId: 1, status: 1, createdAt: -1 });
 
 module.exports = mongoose.model('Registration', registrationSchema);

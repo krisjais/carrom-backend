@@ -376,7 +376,8 @@ const getAllRegistrations = async (req, res, next) => {
 
     let registrations = await Registration.find(query)
       .populate('participantId')
-      .sort({ createdAt: -1 });
+      .sort({ createdAt: -1 })
+      .lean();
 
     if (search) {
       const s = search.toLowerCase();
@@ -838,6 +839,7 @@ const importParticipants = async (req, res, next) => {
       const rawName = (raw.fullName || raw.name || raw.athlete || raw.player || '').replace(/\s+/g, ' ').trim();
       const rawGender = (raw.gender || raw.sex || '').trim().toLowerCase();
       const rawDept = (raw.department || raw.dept || raw.major || raw.branch || '').replace(/\s+/g, ' ').trim();
+      const rawPhone = String(raw.phone || raw.whatsapp || raw.mobile || raw.contact || '').replace(/\s+/g, ' ').trim();
 
       // Partner fields strictly sanitized (cannot be Yes/No/True/False)
       const rawBoysDoubles = sanitizePartner(raw.boysDoublesPartner || raw.boysPartner || raw.boysDoubles);
@@ -1071,7 +1073,7 @@ const importParticipants = async (req, res, next) => {
           studentId: '',
           department: rawDept,
           email: '',
-          phone: '',
+          phone: rawPhone,
           isApproved: false
         });
 
@@ -1407,6 +1409,22 @@ const adminAddPlayer = async (req, res, next) => {
   }
 };
 
+const { seedBreakdownData } = require('../services/breakdownSeedService');
+
+// Admin: Seed verified gender/format breakdown dataset (47 participants)
+const seedBreakdown = async (req, res, next) => {
+  try {
+    const summary = await seedBreakdownData(req.user);
+    res.json({
+      success: true,
+      message: `Seeded ${summary.uniqueParticipants.total} participants and ${summary.teams.total} approved category entries.`,
+      summary
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   submitRegistration,
   lookupRegistrationByStudentId,
@@ -1418,5 +1436,6 @@ module.exports = {
   bulkDeleteRegistrations,
   getValidationSummary,
   importParticipants,
-  adminAddPlayer
+  adminAddPlayer,
+  seedBreakdown
 };
