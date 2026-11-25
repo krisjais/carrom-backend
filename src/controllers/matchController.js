@@ -1,3 +1,4 @@
+const mongoose = require('mongoose');
 const Match = require('../models/Match');
 const Tournament = require('../models/Tournament');
 const Team = require('../models/Team');
@@ -590,6 +591,9 @@ const substituteMatchPartner = async (req, res, next) => {
       newPartnerName, // Optional: custom partner string
       newParticipantId, // Optional: replacement participant ObjectId
       targetPlayerSlot, // Optional: 'player1' or 'player2'
+      matchNumber, // Optional fallback lookup
+      category, // Optional fallback lookup
+      targetTeamId, // Optional fallback lookup
       reason
     } = req.body;
 
@@ -597,7 +601,77 @@ const substituteMatchPartner = async (req, res, next) => {
       return res.status(400).json({ success: false, message: 'Slot must be "team1" or "team2".' });
     }
 
-    const match = await Match.findById(id);
+    let match = null;
+    if (mongoose.Types.ObjectId.isValid(id)) {
+      match = await Match.findById(id);
+    }
+
+    // Fallback 1: Locate by matchNumber + category in active tournament if match._id was stale
+    if (!match && matchNumber && category) {
+      const activeTourn = await Tournament.findOne().sort({ createdAt: -1 });
+      if (activeTourn) {
+        match = await Match.findOne({
+          tournamentId: activeTourn._id,
+          category,
+          matchNumber: Number(matchNumber)
+        });
+      }
+    }
+
+    // Fallback 2: Locate by targetTeamId in active tournament
+    if (!match && targetTeamId && mongoose.Types.ObjectId.isValid(targetTeamId)) {
+      const activeTourn = await Tournament.findOne().sort({ createdAt: -1 });
+      if (activeTourn) {
+        match = await Match.findOne({
+          tournamentId: activeTourn._id,
+          $or: [{ team1: targetTeamId }, { team2: targetTeamId }]
+        }).sort({ roundNumber: -1 });
+      }
+    }
+
+    // Fallback 3: If match still not found (e.g. deleted/re-drawn) but targetTeamId exists, update the Team directly
+    if (!match && targetTeamId && mongoose.Types.ObjectId.isValid(targetTeamId)) {
+      const team = await Team.findById(targetTeamId).populate('player1').populate('player2');
+      if (team) {
+        const oldTeamName = team.name;
+        if (newParticipantId) {
+          const replacement = await Participant.findById(newParticipantId);
+          if (!replacement) {
+            return res.status(404).json({ success: false, message: 'Replacement participant not found.' });
+          }
+          const isSingles = team.category.includes('singles');
+          if (isSingles || targetPlayerSlot === 'player1') {
+            team.player1 = replacement._id;
+          } else {
+            team.player2 = replacement._id;
+          }
+        }
+        if (newPartnerName !== undefined) {
+          team.rawPartnerName = (newPartnerName || '').trim();
+        }
+        if (newName && newName.trim()) {
+          team.name = newName.trim();
+        } else {
+          await team.populate('player1');
+          await team.populate('player2');
+          if (team.player1 && team.player2) {
+            team.name = `${team.player1.fullName} & ${team.player2.fullName}`;
+          } else if (team.player1 && team.rawPartnerName) {
+            team.name = `${team.player1.fullName} & ${team.rawPartnerName}`;
+          } else if (team.player1) {
+            team.name = team.player1.fullName;
+          }
+        }
+        await team.save();
+        return res.json({
+          success: true,
+          message: `Team updated successfully! Active name: "${team.name}"`,
+          team,
+          match: null
+        });
+      }
+    }
+
     if (!match) {
       return res.status(404).json({ success: false, message: 'Match not found.' });
     }
@@ -707,7 +781,7 @@ const substituteMatchPartner = async (req, res, next) => {
       }
     }
 
-    const populatedMatch = await Match.findById(id)
+    const populatedMatch = await Match.findById(match._id)
       .populate({
         path: 'team1',
         populate: [{ path: 'player1' }, { path: 'player2' }]
@@ -720,6 +794,9 @@ const substituteMatchPartner = async (req, res, next) => {
         path: 'winnerTeam',
         populate: [{ path: 'player1' }, { path: 'player2' }]
       });
+
+    emitMatchUpdate(match._id, 'carrom:match_updated', populatedMatch);
+    emitCarromLive('carrom:match_updated', populatedMatch);
 
     res.json({
       success: true,
