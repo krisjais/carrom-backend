@@ -298,7 +298,9 @@ const enqueueNewlyReadyMatch = async (tournamentId, matchDoc) => {
  * Generates/reschedules sequential schedule across selected or all categories
  * Supports:
  * - Specific category filtering ('all' vs 'boys_singles', etc.)
- * - Restarting matches (resetting live & completed matches back to 0-0 fresh schedule)
+ * - Rescheduling only the current playable round for each category
+ * - Holding later bracket rounds until their winners advance
+ * - Restarting the active round from 0-0 when requested
  * - Intelligent court distribution across Board 1, Board 2, etc.
  */
 const generateSequentialSchedule = async (tournamentId, settings = {}, adminUserId = null) => {
@@ -319,11 +321,87 @@ const generateSequentialSchedule = async (tournamentId, settings = {}, adminUser
   if (settings.breakTimeMinutes !== undefined) tournament.scheduleSettings.breakTimeMinutes = Number(settings.breakTimeMinutes);
   if (settings.minRestTimeMinutes !== undefined) tournament.scheduleSettings.minRestTimeMinutes = Number(settings.minRestTimeMinutes);
 
+  const selectedCategory = settings.category && settings.category !== 'all' ? settings.category : null;
+  const restartMatches = settings.restartMatches === true || settings.restartMatches === 'true';
+
+  const categoryFilter = selectedCategory ? { category: selectedCategory } : {};
+  const scopedMatches = await Match.find({ tournamentId, ...categoryFilter })
+    .select('category roundNumber isBye status winnerTeam');
+  const categoryIds = [...new Set(scopedMatches.map((match) => match.category))];
+  const currentRoundByCategory = new Map();
+
+  for (const match of scopedMatches) {
+    if (match.roundNumber <= 0 || match.isBye || (match.status === 'completed' && match.winnerTeam)) continue;
+    const currentRound = currentRoundByCategory.get(match.category);
+    if (currentRound === undefined || match.roundNumber < currentRound) {
+      currentRoundByCategory.set(match.category, match.roundNumber);
+    }
+  }
+
+  const schedulableStages = [];
+  for (const category of categoryIds) {
+    const currentRound = currentRoundByCategory.get(category);
+    if (currentRound !== undefined) {
+      schedulableStages.push({ category, roundNumber: currentRound });
+      continue;
+    }
+
+    if (scopedMatches.some((match) => match.category === category && match.roundNumber === 0 && !match.isBye)) {
+      schedulableStages.push({ category, roundNumber: 0 });
+    }
+  }
+
+  const defaultBoards = [
+    { boardNumber: 1, team1Score: 0, team2Score: 0, queenPocketedBy: 'none', queenCovered: false, team1Fouls: 0, team2Fouls: 0, boardWinner: null },
+    { boardNumber: 2, team1Score: 0, team2Score: 0, queenPocketedBy: 'none', queenCovered: false, team1Fouls: 0, team2Fouls: 0, boardWinner: null },
+    { boardNumber: 3, team1Score: 0, team2Score: 0, queenPocketedBy: 'none', queenCovered: false, team1Fouls: 0, team2Fouls: 0, boardWinner: null }
+  ];
+
+  for (const [category, currentRound] of currentRoundByCategory.entries()) {
+    const futureFilter = { tournamentId, category, roundNumber: { $gt: currentRound } };
+    const futureLiveMatch = await Match.findOne({ ...futureFilter, status: 'live' }).select('matchNumber');
+    if (futureLiveMatch) {
+      throw new Error(`Cannot reschedule Round ${currentRound} while later-round Match #${futureLiveMatch.matchNumber} is live.`);
+    }
+  }
+
   tournament.markModified('scheduleSettings');
   await tournament.save();
 
-  const selectedCategory = settings.category && settings.category !== 'all' ? settings.category : null;
-  const restartMatches = settings.restartMatches === true || settings.restartMatches === 'true';
+  for (const [category, currentRound] of currentRoundByCategory.entries()) {
+    const futureFilter = { tournamentId, category, roundNumber: { $gt: currentRound } };
+    await Match.updateMany(
+      { ...futureFilter, isBye: false, status: 'scheduled' },
+      { $set: { status: 'pending', queuePosition: null, scheduledTime: null } }
+    );
+
+    if (restartMatches) {
+      const resetFutureFields = {
+        winnerTeam: null,
+        isResultConfirmed: false,
+        queuePosition: null,
+        scheduledTime: null,
+        actualStartTime: null,
+        actualEndTime: null,
+        boards: defaultBoards,
+        finalScore: { team1BoardsWon: 0, team2BoardsWon: 0 },
+        isTimerPaused: false,
+        timerPausedAt: null,
+        timeElapsedBeforePause: 0,
+        elapsedTimeSeconds: 0,
+        extraTimeMinutes: 0
+      };
+
+      await Match.updateMany(
+        { ...futureFilter, isManual: { $ne: true }, isBye: false },
+        { $set: { ...resetFutureFields, team1: null, team2: null, status: 'pending' } }
+      );
+      await Match.updateMany(
+        { ...futureFilter, isManual: { $ne: true }, isBye: true },
+        { $set: { ...resetFutureFields, team1: null, team2: null, status: 'bye', isResultConfirmed: true, boards: [] } }
+      );
+    }
+  }
 
   // Base match query for matches with known teams and not BYE
   const matchFilter = {
@@ -336,24 +414,20 @@ const generateSequentialSchedule = async (tournamentId, settings = {}, adminUser
   if (selectedCategory) {
     matchFilter.category = selectedCategory;
   }
+  matchFilter.$or = schedulableStages;
 
   // If NOT restarting, we only reschedule uncompleted matches
   if (!restartMatches) {
     matchFilter.status = { $ne: 'completed' };
   }
 
-  const playableMatches = await Match.find(matchFilter).sort({ roundNumber: 1, category: 1, matchNumber: 1 });
+  const playableMatches = schedulableStages.length > 0
+    ? await Match.find(matchFilter).sort({ roundNumber: 1, category: 1, matchNumber: 1 })
+    : [];
 
   // Get active courts/boards
   const boards = await CarromBoard.find({ tournamentId, status: { $ne: 'maintenance' } }).sort({ boardNumber: 1 });
   const boardCount = boards.length || 1;
-
-  // Default empty board states for fresh reset
-  const defaultBoards = [
-    { boardNumber: 1, team1Score: 0, team2Score: 0, queenPocketedBy: 'none', queenCovered: false, team1Fouls: 0, team2Fouls: 0, boardWinner: null },
-    { boardNumber: 2, team1Score: 0, team2Score: 0, queenPocketedBy: 'none', queenCovered: false, team1Fouls: 0, team2Fouls: 0, boardWinner: null },
-    { boardNumber: 3, team1Score: 0, team2Score: 0, queenPocketedBy: 'none', queenCovered: false, team1Fouls: 0, team2Fouls: 0, boardWinner: null }
-  ];
 
   let qPos = 1;
   let restartedCount = 0;
@@ -382,6 +456,7 @@ const generateSequentialSchedule = async (tournamentId, settings = {}, adminUser
       m.isTimerPaused = false;
       m.timerPausedAt = null;
       m.timeElapsedBeforePause = 0;
+      m.elapsedTimeSeconds = 0;
       m.extraTimeMinutes = 0;
       restartedCount++;
     } else {

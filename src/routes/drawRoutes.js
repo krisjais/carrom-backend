@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const {
   generateCategoryDraw,
+  generateManualCategoryDraw,
   getBracketTree,
   attachLateMatches,
   deleteCategoryMatches,
@@ -11,6 +12,7 @@ const {
 const { authRequired, adminOnly } = require('../middleware/auth');
 
 router.post('/generate', authRequired, adminOnly, generateCategoryDraw);
+router.post('/manual', authRequired, adminOnly, generateManualCategoryDraw);
 router.post('/category/:category/attach-late-matches', authRequired, adminOnly, attachLateMatches);
 router.delete('/category/:category/matches', authRequired, adminOnly, deleteCategoryMatches);
 router.get('/category/:category', getBracketTree);

@@ -34,6 +34,40 @@ const generateCategoryDraw = async (req, res, next) => {
   }
 };
 
+// Generate a bracket with the admin's chosen entries paired in its first match.
+const generateManualCategoryDraw = async (req, res, next) => {
+  try {
+    const { category, team1Id, team2Id, tournamentId } = req.body || {};
+    if (!ALLOWED_DRAW_CATEGORIES.includes(category)) {
+      return res.status(400).json({ success: false, message: 'Select a valid tournament category.' });
+    }
+    if (!team1Id || !team2Id || String(team1Id) === String(team2Id)) {
+      return res.status(400).json({ success: false, message: 'Select two different entries for the manual match.' });
+    }
+
+    let tournId = tournamentId;
+    if (!tournId) {
+      const activeTourn = await Tournament.findOne().sort({ createdAt: -1 });
+      if (!activeTourn) return res.status(400).json({ success: false, message: 'No active tournament found.' });
+      tournId = activeTourn._id;
+    }
+
+    const existingMatchCount = await Match.countDocuments({ tournamentId: tournId, category });
+    if (existingMatchCount > 0) {
+      return res.status(409).json({ success: false, message: 'A draw already exists. Use Add Late Match to add entries to its active round.' });
+    }
+
+    const result = await generateDynamicBracket(tournId, category, req.user._id, [team1Id, team2Id]);
+    res.status(201).json({
+      success: true,
+      message: `Manual Match #1 created for ${category.replace('_', ' ').toUpperCase()}. Remaining approved entries were paired into the bracket, with any BYE assigned automatically.`,
+      result
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 // Get complete structured bracket tree for a category
 const getBracketTree = async (req, res, next) => {
   try {
@@ -346,6 +380,7 @@ const advanceRound = async (req, res, next) => {
 
 module.exports = {
   generateCategoryDraw,
+  generateManualCategoryDraw,
   getBracketTree,
   attachLateMatches,
   deleteCategoryMatches,
