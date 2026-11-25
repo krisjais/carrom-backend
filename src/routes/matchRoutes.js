@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const {
   getMatches,
+  createAdditionalMatch,
   getLiveMatches,
   getMatchById,
   startMatch,
@@ -16,6 +17,7 @@ const {
 const { authRequired, adminOnly } = require('../middleware/auth');
 
 router.get('/', getMatches);
+router.post('/manual', authRequired, adminOnly, createAdditionalMatch);
 router.get('/live', getLiveMatches);
 router.get('/:id', getMatchById);
 router.post('/:id/start', authRequired, adminOnly, startMatch);

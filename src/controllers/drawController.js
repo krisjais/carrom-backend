@@ -1,7 +1,11 @@
-const { generateDynamicBracket } = require('../services/drawEngine');
+const { generateDynamicBracket, attachManualMatchesToActiveRound } = require('../services/drawEngine');
 const Tournament = require('../models/Tournament');
 const Match = require('../models/Match');
+const CarromBoard = require('../models/CarromBoard');
 const AuditLog = require('../models/AuditLog');
+const { recalculateEstimatedTimes } = require('../services/scheduleEngine');
+
+const ALLOWED_DRAW_CATEGORIES = ['boys_singles', 'girls_singles', 'boys_doubles', 'girls_doubles', 'mixed_doubles'];
 
 // Generate dynamic knockout draw for a category
 const generateCategoryDraw = async (req, res, next) => {
@@ -43,7 +47,7 @@ const getBracketTree = async (req, res, next) => {
       tournId = activeTourn._id;
     }
 
-    const matches = await Match.find({ tournamentId: tournId, category })
+    const allMatches = await Match.find({ tournamentId: tournId, category })
       .populate({
         path: 'team1',
         populate: [{ path: 'player1' }, { path: 'player2' }]
@@ -57,6 +61,8 @@ const getBracketTree = async (req, res, next) => {
         populate: [{ path: 'player1' }, { path: 'player2' }]
       })
       .sort({ roundNumber: 1, matchIndexInRound: 1 });
+
+    const matches = allMatches;
 
     // Group by rounds
     const roundsMap = {};
@@ -86,6 +92,108 @@ const getBracketTree = async (req, res, next) => {
       totalRounds: rounds.length,
       rounds,
       rawMatches: matches
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// Admin: Move late fixtures created by the previous standalone flow into the current bracket round
+const attachLateMatches = async (req, res, next) => {
+  try {
+    const { category } = req.params;
+    const allowedCategories = ['boys_singles', 'girls_singles', 'boys_doubles', 'girls_doubles', 'mixed_doubles'];
+    if (!allowedCategories.includes(category)) {
+      return res.status(400).json({ success: false, message: 'Select a valid tournament category.' });
+    }
+
+    const tournament = await Tournament.findOne().sort({ createdAt: -1 });
+    if (!tournament) {
+      return res.status(404).json({ success: false, message: 'No active tournament found.' });
+    }
+    const result = await attachManualMatchesToActiveRound(tournament._id, category);
+    if (result.migratedCount > 0) {
+      await AuditLog.create({
+        action: 'ATTACH_LATE_MATCHES_TO_BRACKET',
+        performedBy: req.user._id,
+        performedByName: req.user.fullName || 'Admin',
+        entityType: 'CategoryDraw',
+        entityId: category,
+        details: { category, ...result },
+        reason: `Moved ${result.migratedCount} late-entry match(es) into ${result.roundName}.`
+      });
+    }
+
+    res.json({
+      success: true,
+      migratedCount: result.migratedCount,
+      roundNumber: result.roundNumber,
+      roundName: result.roundName
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// Admin: Clear one category's draw so it can be generated again
+const deleteCategoryMatches = async (req, res, next) => {
+  try {
+    const { category } = req.params;
+    if (!ALLOWED_DRAW_CATEGORIES.includes(category)) {
+      return res.status(400).json({ success: false, message: 'Select a valid tournament category.' });
+    }
+
+    const tournament = await Tournament.findOne().sort({ createdAt: -1 });
+    if (!tournament) {
+      return res.status(404).json({ success: false, message: 'No active tournament found.' });
+    }
+
+    const categoryMatches = await Match.find({ tournamentId: tournament._id, category }).select('_id status');
+    const liveMatchCount = categoryMatches.filter((match) => match.status === 'live').length;
+    if (liveMatchCount > 0) {
+      return res.status(409).json({
+        success: false,
+        message: 'Matches cannot be deleted while a match in this category is live. Finish or stop the live match first.'
+      });
+    }
+
+    const matchIds = categoryMatches.map((match) => match._id);
+    const deleteResult = await Match.deleteMany({ tournamentId: tournament._id, category });
+
+    if (matchIds.length > 0) {
+      await CarromBoard.updateMany(
+        { tournamentId: tournament._id, currentMatchId: { $in: matchIds }, status: 'live' },
+        { $set: { currentMatchId: null, status: 'available' } }
+      );
+      await CarromBoard.updateMany(
+        { tournamentId: tournament._id, currentMatchId: { $in: matchIds }, status: { $ne: 'live' } },
+        { $set: { currentMatchId: null } }
+      );
+    }
+
+    if (!tournament.drawsLocked) tournament.drawsLocked = {};
+    if (!tournament.drawsPublished) tournament.drawsPublished = {};
+    tournament.drawsLocked[category] = false;
+    tournament.drawsPublished[category] = false;
+    tournament.markModified('drawsLocked');
+    tournament.markModified('drawsPublished');
+    await tournament.save();
+    await recalculateEstimatedTimes(tournament._id);
+
+    await AuditLog.create({
+      action: 'DELETE_CATEGORY_MATCHES',
+      performedBy: req.user._id,
+      performedByName: req.user.fullName || 'Admin',
+      entityType: 'CategoryDraw',
+      entityId: category,
+      details: { category, deletedCount: deleteResult.deletedCount },
+      reason: `Deleted all matches and unlocked the ${category.replace('_', ' ')} draw for regeneration.`
+    });
+
+    res.json({
+      success: true,
+      deletedCount: deleteResult.deletedCount,
+      message: `Deleted ${deleteResult.deletedCount} match(es). The draw is unlocked and ready to generate again.`
     });
   } catch (error) {
     next(error);
@@ -239,6 +347,8 @@ const advanceRound = async (req, res, next) => {
 module.exports = {
   generateCategoryDraw,
   getBracketTree,
+  attachLateMatches,
+  deleteCategoryMatches,
   publishAndLockDraw,
   advanceRound
 };

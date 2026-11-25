@@ -12,8 +12,15 @@ const {
 } = require('../services/scoringEngine');
 const {
   canStartMatch,
-  recalculateEstimatedTimes
+  recalculateEstimatedTimes,
+  enqueueNewlyReadyMatch
 } = require('../services/scheduleEngine');
+const {
+  getCurrentBracketRoundNumber,
+  ensureFollowupRoundCapacity,
+  attachManualMatchesToActiveRound,
+  progressCategoryToNextRound
+} = require('../services/drawEngine');
 const { emitMatchUpdate, emitCarromLive } = require('../socket');
 
 // Get all matches with filtering
@@ -49,6 +56,174 @@ const getMatches = async (req, res, next) => {
       .sort({ queuePosition: 1, scheduledTime: 1, roundNumber: 1, matchNumber: 1 });
 
     res.json({ success: true, count: matches.length, matches });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// Admin: Add late entries to the currently active round in a generated draw
+const createAdditionalMatch = async (req, res, next) => {
+  try {
+    const { category, team1Id, team2Id } = req.body || {};
+    const allowedCategories = ['boys_singles', 'girls_singles', 'boys_doubles', 'girls_doubles', 'mixed_doubles'];
+    const hasTeam2 = Boolean(team2Id);
+
+    if (!allowedCategories.includes(category)) {
+      return res.status(400).json({ success: false, message: 'Select a valid tournament category.' });
+    }
+    if (!mongoose.Types.ObjectId.isValid(team1Id) || (hasTeam2 && !mongoose.Types.ObjectId.isValid(team2Id))) {
+      return res.status(400).json({ success: false, message: 'Select a valid entry or pair.' });
+    }
+    if (hasTeam2 && String(team1Id) === String(team2Id)) {
+      return res.status(400).json({ success: false, message: 'Choose two different entries.' });
+    }
+
+    const tournament = await Tournament.findOne().sort({ createdAt: -1 });
+    if (!tournament) {
+      return res.status(404).json({ success: false, message: 'No active tournament found.' });
+    }
+    const existingMatchCount = await Match.countDocuments({ tournamentId: tournament._id, category });
+    if (existingMatchCount === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Generate the draw for this category before adding a late entry.'
+      });
+    }
+
+    const selectedTeamIds = hasTeam2 ? [team1Id, team2Id] : [team1Id];
+    const selectedTeams = await Team.find({
+      _id: { $in: selectedTeamIds },
+      tournamentId: tournament._id,
+      category,
+      isApproved: true
+    });
+    if (selectedTeams.length !== selectedTeamIds.length) {
+      return res.status(400).json({
+        success: false,
+        message: 'Every selected entry must be approved in this category and active tournament.'
+      });
+    }
+
+    await attachManualMatchesToActiveRound(tournament._id, category);
+
+    const categoryMatches = await Match.find({ tournamentId: tournament._id, category })
+      .sort({ roundNumber: 1, matchIndexInRound: 1 });
+    const assignedTeamIds = new Set(
+      categoryMatches.flatMap((match) => [match.team1, match.team2]).filter(Boolean).map((id) => String(id))
+    );
+    if (selectedTeamIds.some((id) => assignedTeamIds.has(String(id)))) {
+      return res.status(400).json({
+        success: false,
+        message: 'One or more selected entries are already assigned to a tournament match.'
+      });
+    }
+
+    if (!hasTeam2) {
+      const approvedTeams = await Team.find({
+        tournamentId: tournament._id,
+        category,
+        isApproved: true
+      }).select('_id');
+      const unassignedTeams = approvedTeams.filter((team) => !assignedTeamIds.has(String(team._id)));
+      if (unassignedTeams.length !== 1 || String(unassignedTeams[0]?._id) !== String(team1Id)) {
+        return res.status(400).json({
+          success: false,
+          message: 'A BYE can be added only when exactly one approved entry is left. Select two entries to create a match.'
+        });
+      }
+    }
+
+    const currentRoundNumber = getCurrentBracketRoundNumber(categoryMatches);
+    if (!currentRoundNumber) {
+      return res.status(400).json({
+        success: false,
+        message: 'There is no active bracket round for this category.'
+      });
+    }
+    const currentRoundMatches = categoryMatches.filter((match) => match.roundNumber === currentRoundNumber);
+    const currentRoundName = currentRoundMatches[0]?.roundName || `Round ${currentRoundNumber}`;
+
+    const [latestCategoryMatch, boards] = await Promise.all([
+      Match.findOne({ tournamentId: tournament._id, category }).sort({ matchNumber: -1 }).select('matchNumber'),
+      hasTeam2
+        ? CarromBoard.find({ tournamentId: tournament._id, status: { $ne: 'maintenance' } }).sort({ boardNumber: 1 })
+        : Promise.resolve([])
+    ]);
+    const targetBoard = boards.find((board) => board.assignedCategory === category)
+      || boards.find((board) => board.assignedCategory === 'all')
+      || boards[0];
+    const duration = tournament.scheduleSettings?.roundDurationMinutes
+      || tournament.scheduleSettings?.matchDurationMinutes
+      || 20;
+
+    let match = await Match.create({
+      tournamentId: tournament._id,
+      category,
+      roundNumber: currentRoundNumber,
+      roundName: currentRoundName,
+      matchNumber: (latestCategoryMatch?.matchNumber || 0) + 1,
+      matchIndexInRound: currentRoundMatches.reduce((max, currentMatch) => Math.max(max, currentMatch.matchIndexInRound || 0), -1) + 1,
+      team1: team1Id,
+      team2: hasTeam2 ? team2Id : null,
+      isManual: true,
+      isBye: !hasTeam2,
+      status: hasTeam2 ? 'pending' : 'bye',
+      winnerTeam: hasTeam2 ? null : team1Id,
+      isResultConfirmed: !hasTeam2,
+      boardName: targetBoard?.name || 'Carrom Board 1',
+      carromBoardNumber: targetBoard?.boardNumber || 1,
+      queuePosition: null,
+      roundDurationMinutes: duration,
+      durationMinutes: duration,
+      boards: hasTeam2 ? undefined : []
+    });
+
+    try {
+      await ensureFollowupRoundCapacity(
+        tournament._id,
+        category,
+        currentRoundNumber,
+        currentRoundMatches.length + 1,
+        currentRoundName
+      );
+    } catch (error) {
+      await Match.deleteOne({ _id: match._id });
+      throw error;
+    }
+
+    if (hasTeam2) {
+      match = await enqueueNewlyReadyMatch(tournament._id, match);
+    } else {
+      await progressCategoryToNextRound(tournament._id, category, currentRoundNumber);
+    }
+
+    const populatedMatch = await Match.findById(match._id)
+      .populate({ path: 'team1', populate: [{ path: 'player1' }, { path: 'player2' }] })
+      .populate({ path: 'team2', populate: [{ path: 'player1' }, { path: 'player2' }] })
+      .populate({ path: 'winnerTeam', populate: [{ path: 'player1' }, { path: 'player2' }] });
+
+    await AuditLog.create({
+      action: 'CREATE_ADDITIONAL_MATCH',
+      performedBy: req.user._id,
+      performedByName: req.user.fullName || 'Admin',
+      entityType: 'Match',
+      entityId: match._id.toString(),
+      details: { category, matchNumber: match.matchNumber, team1Id, team2Id: hasTeam2 ? team2Id : null, isBye: !hasTeam2 },
+      reason: hasTeam2
+        ? `Added a late-entry ${category.replace('_', ' ')} match to ${currentRoundName}.`
+        : `Added a late-entry BYE for ${category.replace('_', ' ')} to ${currentRoundName}.`
+    });
+
+    emitMatchUpdate(match._id, 'carrom:match_updated', populatedMatch);
+    emitCarromLive('carrom:match_updated', populatedMatch);
+
+    res.status(201).json({
+      success: true,
+      message: hasTeam2
+        ? `Late-entry Match #${match.matchNumber} added to ${currentRoundName}. Its winner will advance through the bracket. The live match continues uninterrupted.`
+        : `Late entry added as a BYE in ${currentRoundName}. The entry will advance automatically when the round is ready.`,
+      match: populatedMatch
+    });
   } catch (error) {
     next(error);
   }
@@ -810,6 +985,7 @@ const substituteMatchPartner = async (req, res, next) => {
 
 module.exports = {
   getMatches,
+  createAdditionalMatch,
   getLiveMatches,
   getMatchById,
   startMatch,

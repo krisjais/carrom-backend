@@ -54,6 +54,182 @@ const calculateRoundsPlan = (N) => {
   return roundsPlan;
 };
 
+const DEFAULT_MATCH_BOARDS = [
+  { boardNumber: 1, team1Score: 0, team2Score: 0, queenPocketedBy: 'none', queenCovered: false, team1Fouls: 0, team2Fouls: 0, boardWinner: null },
+  { boardNumber: 2, team1Score: 0, team2Score: 0, queenPocketedBy: 'none', queenCovered: false, team1Fouls: 0, team2Fouls: 0, boardWinner: null },
+  { boardNumber: 3, team1Score: 0, team2Score: 0, queenPocketedBy: 'none', queenCovered: false, team1Fouls: 0, team2Fouls: 0, boardWinner: null }
+];
+
+const getCurrentBracketRoundNumber = (matches = []) => {
+  const bracketMatches = matches.filter((match) => match.roundNumber > 0 && !match.isBye);
+  const activeRound = bracketMatches
+    .filter((match) => match.status === 'live' || match.status === 'scheduled')
+    .map((match) => match.roundNumber)
+    .sort((a, b) => a - b)[0];
+  if (activeRound) return activeRound;
+
+  const readyRound = bracketMatches
+    .filter((match) => match.status !== 'completed' && match.team1 && match.team2)
+    .map((match) => match.roundNumber)
+    .sort((a, b) => a - b)[0];
+  return readyRound || null;
+};
+
+/**
+ * Ensures the rounds after an active stage can hold every winner, including newly added late-entry matches.
+ * Extra matches can change the number of required rounds, so future placeholders are expanded before play advances.
+ */
+const ensureFollowupRoundCapacity = async (tournamentId, category, currentRoundNumber, advancingEntryCount, currentRoundName = '') => {
+  const futurePlan = calculateRoundsPlan(advancingEntryCount);
+  if (futurePlan.length === 0) return [];
+
+  let latestMatch = await Match.findOne({ tournamentId, category }).sort({ matchNumber: -1 }).select('matchNumber');
+  let nextMatchNumber = (latestMatch?.matchNumber || 0) + 1;
+  let previousRoundName = currentRoundName;
+  const updatedPlan = [];
+
+  for (let planIndex = 0; planIndex < futurePlan.length; planIndex++) {
+    const roundNumber = currentRoundNumber + planIndex + 1;
+    const stageMatches = await Match.find({ tournamentId, category, roundNumber }).select('status team1 team2');
+    if (stageMatches.some((match) => match.status === 'live' || match.status === 'completed' || match.status === 'scheduled' || match.team1 || match.team2)) {
+      throw new Error(`Round ${roundNumber} has already started and cannot be expanded safely.`);
+    }
+  }
+
+  for (let planIndex = 0; planIndex < futurePlan.length; planIndex++) {
+    const plan = futurePlan[planIndex];
+    const roundNumber = currentRoundNumber + planIndex + 1;
+    const repeatsPreviousStage = plan.roundName === previousRoundName;
+    const roundName = repeatsPreviousStage && planIndex < futurePlan.length - 1
+      ? `${plan.roundName} Play-in`
+      : repeatsPreviousStage && plan.roundName === 'Finals'
+      ? 'Championship Final'
+      : plan.roundName;
+    previousRoundName = roundName;
+    updatedPlan.push({ ...plan, roundName, roundNumber });
+
+    const stageMatches = await Match.find({ tournamentId, category, roundNumber }).sort({ matchIndexInRound: 1 });
+    if (stageMatches.some((match) => match.status === 'live' || match.status === 'completed' || match.status === 'scheduled' || match.team1 || match.team2)) {
+      throw new Error(`Round ${roundNumber} has already started and cannot be expanded safely.`);
+    }
+
+    let realMatches = stageMatches.filter((match) => !match.isBye);
+    let byeMatches = stageMatches.filter((match) => match.isBye);
+
+    const makePlaceholder = async (isBye) => {
+      const match = await Match.create({
+        tournamentId,
+        category,
+        roundNumber,
+        roundName,
+        matchNumber: nextMatchNumber++,
+        matchIndexInRound: stageMatches.length,
+        team1: null,
+        team2: null,
+        isBye,
+        winnerTeam: null,
+        nextMatchId: null,
+        nextMatchSlot: null,
+        status: isBye ? 'bye' : 'pending',
+        boardName: 'Main Carrom Board',
+        carromBoardNumber: 1,
+        queuePosition: null,
+        boards: isBye ? [] : DEFAULT_MATCH_BOARDS,
+        finalScore: { team1BoardsWon: 0, team2BoardsWon: 0 },
+        isResultConfirmed: isBye
+      });
+      stageMatches.push(match);
+      if (isBye) byeMatches.push(match);
+      else realMatches.push(match);
+    };
+
+    while (realMatches.length < plan.realMatchesCount) {
+      const byePlaceholder = byeMatches.pop();
+      if (byePlaceholder) {
+        byePlaceholder.isBye = false;
+        byePlaceholder.status = 'pending';
+        byePlaceholder.winnerTeam = null;
+        byePlaceholder.isResultConfirmed = false;
+        byePlaceholder.boards = DEFAULT_MATCH_BOARDS;
+        byePlaceholder.finalScore = { team1BoardsWon: 0, team2BoardsWon: 0 };
+        await byePlaceholder.save();
+        realMatches.push(byePlaceholder);
+      } else {
+        await makePlaceholder(false);
+      }
+    }
+
+    while (byeMatches.length < plan.byesCount) {
+      const extraReal = realMatches.length > plan.realMatchesCount ? realMatches.pop() : null;
+      if (extraReal && !extraReal.team1 && !extraReal.team2) {
+        extraReal.isBye = true;
+        extraReal.status = 'bye';
+        extraReal.winnerTeam = null;
+        extraReal.isResultConfirmed = true;
+        extraReal.boards = [];
+        await extraReal.save();
+        byeMatches.push(extraReal);
+      } else {
+        if (extraReal) realMatches.push(extraReal);
+        await makePlaceholder(true);
+      }
+    }
+
+    while (byeMatches.length > plan.byesCount) {
+      const surplusBye = byeMatches.pop();
+      if (!surplusBye.team1 && !surplusBye.team2 && !surplusBye.winnerTeam) {
+        await Match.deleteOne({ _id: surplusBye._id });
+        stageMatches.splice(stageMatches.findIndex((match) => String(match._id) === String(surplusBye._id)), 1);
+      }
+    }
+
+    const normalizedMatches = [...realMatches, ...byeMatches].sort((a, b) => a.matchIndexInRound - b.matchIndexInRound);
+    for (let index = 0; index < normalizedMatches.length; index++) {
+      const match = normalizedMatches[index];
+      match.roundName = roundName;
+      match.matchIndexInRound = index;
+      await match.save();
+    }
+  }
+
+  return updatedPlan;
+};
+
+const attachManualMatchesToActiveRound = async (tournamentId, category) => {
+  const legacyMatches = await Match.find({ tournamentId, category, roundNumber: 0 })
+    .sort({ queuePosition: 1, matchNumber: 1 });
+  if (legacyMatches.length === 0) return { migratedCount: 0, roundNumber: null };
+
+  const bracketMatches = await Match.find({ tournamentId, category, roundNumber: { $gt: 0 } })
+    .sort({ roundNumber: 1, matchIndexInRound: 1 });
+  const currentRoundNumber = getCurrentBracketRoundNumber(bracketMatches);
+  if (!currentRoundNumber) return { migratedCount: 0, roundNumber: null };
+
+  const currentRoundMatches = bracketMatches.filter((match) => match.roundNumber === currentRoundNumber);
+  const currentRoundName = currentRoundMatches[0]?.roundName || `Round ${currentRoundNumber}`;
+  await ensureFollowupRoundCapacity(
+    tournamentId,
+    category,
+    currentRoundNumber,
+    currentRoundMatches.length + legacyMatches.length,
+    currentRoundName
+  );
+
+  let nextIndex = currentRoundMatches.reduce((max, match) => Math.max(max, match.matchIndexInRound || 0), -1) + 1;
+  for (const match of legacyMatches) {
+    match.isManual = true;
+    match.roundNumber = currentRoundNumber;
+    match.roundName = currentRoundName;
+    match.matchIndexInRound = nextIndex++;
+    await match.save();
+  }
+
+  await progressCategoryToNextRound(tournamentId, category, currentRoundNumber);
+  const { recalculateEstimatedTimes } = require('./scheduleEngine');
+  await recalculateEstimatedTimes(tournamentId);
+  return { migratedCount: legacyMatches.length, roundNumber: currentRoundNumber, roundName: currentRoundName };
+};
+
 /**
  * Helper to shuffle an array using Fisher-Yates algorithm
  */
@@ -282,12 +458,18 @@ const progressCategoryToNextRound = async (tournamentId, category, currentRoundN
 
   if (nextMatches.length === 0) return false;
 
-  // Check if next round is already populated
-  const isAlreadyPopulated = nextMatches.some((m) => m.team1 || m.team2);
-  if (isAlreadyPopulated) return true;
+  const isFullyPopulated = nextMatches.every((match) => (
+    match.isBye ? Boolean(match.team1 && match.winnerTeam) : Boolean(match.team1 && match.team2)
+  ));
+  if (isFullyPopulated) return true;
 
   // Shuffle ALL advancing entries freshly for Round r+1
-  const shuffledAdvancing = shuffleArray(advancingTeamIds);
+  const alreadyAssigned = new Set(
+    nextMatches.flatMap((match) => [match.team1, match.team2]).filter(Boolean).map((teamId) => teamId.toString())
+  );
+  const shuffledAdvancing = shuffleArray(
+    advancingTeamIds.filter((teamId) => !alreadyAssigned.has(teamId.toString()))
+  );
 
   const realNextMatches = nextMatches.filter((m) => !m.isBye);
   const byeNextMatches = nextMatches.filter((m) => m.isBye);
@@ -297,27 +479,34 @@ const progressCategoryToNextRound = async (tournamentId, category, currentRoundN
 
   // Pair teams into real matches for Round r+1
   for (const m of realNextMatches) {
-    if (cursor + 1 < shuffledAdvancing.length) {
+    if (!m.team1 && cursor < shuffledAdvancing.length) {
       m.team1 = shuffledAdvancing[cursor++];
+    }
+    if (!m.team2 && cursor < shuffledAdvancing.length) {
       m.team2 = shuffledAdvancing[cursor++];
+    }
+    if (m.team1 && m.team2) {
       // Newly ready match appends to the end of the READY queue in FIFO order
       await enqueueNewlyReadyMatch(tournamentId, m);
     }
   }
 
   // Assign single Bye recipient for Round r+1 if one exists
-  if (byeNextMatches.length === 1 && cursor < shuffledAdvancing.length) {
+  if (byeNextMatches.length === 1) {
     const byeM = byeNextMatches[0];
-    const byeTeamId = shuffledAdvancing[cursor++];
-    byeM.team1 = byeTeamId;
-    byeM.winnerTeam = byeTeamId;
-    byeM.status = 'bye';
-    byeM.isResultConfirmed = true;
-    await byeM.save();
+    if (!byeM.team1 && cursor < shuffledAdvancing.length) {
+      byeM.team1 = shuffledAdvancing[cursor++];
+    }
+    if (byeM.team1) {
+      byeM.winnerTeam = byeM.team1;
+      byeM.status = 'bye';
+      byeM.isResultConfirmed = true;
+      await byeM.save();
 
-    // If Round r+1 has NO real matches (only a Bye), automatically advance to Round r+2
-    if (realNextMatches.length === 0) {
-      await progressCategoryToNextRound(tournamentId, category, nextRoundNumber);
+      // If Round r+1 has NO real matches (only a Bye), automatically advance to Round r+2
+      if (realNextMatches.length === 0) {
+        await progressCategoryToNextRound(tournamentId, category, nextRoundNumber);
+      }
     }
   }
 
@@ -328,5 +517,8 @@ module.exports = {
   generateDynamicBracket,
   getRoundNameByEntries,
   calculateRoundsPlan,
+  getCurrentBracketRoundNumber,
+  ensureFollowupRoundCapacity,
+  attachManualMatchesToActiveRound,
   progressCategoryToNextRound
 };

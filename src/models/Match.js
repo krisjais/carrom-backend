@@ -94,6 +94,10 @@ const matchSchema = new mongoose.Schema(
       type: Boolean,
       default: false
     },
+    isManual: {
+      type: Boolean,
+      default: false
+    },
     winnerTeam: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Team',
