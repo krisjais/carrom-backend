@@ -1,3 +1,4 @@
+const bcrypt = require('bcryptjs');
 const User = require('../models/User');
 const Participant = require('../models/Participant');
 const Tournament = require('../models/Tournament');
@@ -147,13 +148,37 @@ const seedBreakdownData = async (actor = null) => {
     await tournament.save();
   }
 
+  const usedSlugs = new Set();
+  const buildSlug = (fullName) => {
+    const base = String(fullName || 'player')
+      .toLowerCase()
+      .replace(/[^a-z0-9]/g, '');
+    let slug = base || 'player';
+    let suffix = 2;
+    while (usedSlugs.has(slug)) {
+      slug = `${base}${suffix}`;
+      suffix++;
+    }
+    usedSlugs.add(slug);
+    return slug;
+  };
+
+  const enrichedEntries = PARTICIPANTS_DATA.map((entry) => {
+    const slug = buildSlug(entry.fullName);
+    return {
+      ...entry,
+      username: slug,
+      email: `${slug}@carrom.edu`
+    };
+  });
+
   const insertedParticipants = await Participant.insertMany(
-    PARTICIPANTS_DATA.map((entry) => ({
+    enrichedEntries.map((entry) => ({
       fullName: entry.fullName,
       gender: entry.gender,
       studentId: '',
       department: entry.department,
-      email: '',
+      email: entry.email,
       phone: entry.phone,
       isApproved: true
     }))
@@ -163,6 +188,31 @@ const seedBreakdownData = async (actor = null) => {
   insertedParticipants.forEach((doc) => {
     participantMap.set(doc.fullName, doc);
   });
+
+  // Provision participant login User accounts (default password = registered WhatsApp phone)
+  const userDocs = await Promise.all(
+    enrichedEntries.map(async (entry) => {
+      const p = participantMap.get(entry.fullName);
+      const hashedPassword = await bcrypt.hash(entry.phone || 'carrom2026', 8);
+      return {
+        username: entry.username,
+        email: entry.email,
+        password: hashedPassword,
+        role: 'participant',
+        fullName: entry.fullName,
+        participantRef: p._id
+      };
+    })
+  );
+  const insertedUsers = await User.insertMany(userDocs);
+  await Participant.bulkWrite(
+    insertedUsers.map((u) => ({
+      updateOne: {
+        filter: { _id: u.participantRef },
+        update: { $set: { userId: u._id } }
+      }
+    }))
+  );
 
   // Map verified mutual partner IDs so registrations link directly to canonical Participant _id
   const mutualDoublesIdMap = new Map();

@@ -10,22 +10,77 @@ const generateToken = (user) => {
   );
 };
 
-// Login for Admin and Participants
+// Login for Admin and Participants (supports Email, Username, Full Name, or WhatsApp Phone)
 const login = async (req, res, next) => {
   try {
-    const { email, password } = req.body;
-    if (!email || !password) {
-      return res.status(400).json({ success: false, message: 'Please provide both email and password.' });
+    const rawIdentifier = String(req.body.identifier || req.body.email || '').trim();
+    const password = req.body.password;
+    if (!rawIdentifier || !password) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please provide both your login identifier (email, name, or phone) and password.'
+      });
     }
 
-    const user = await User.findOne({ email: email.toLowerCase().trim() }).populate('participantRef');
+    const lowerId = rawIdentifier.toLowerCase();
+    const escapedId = rawIdentifier.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+    // 1. Direct lookup on User by email or username
+    let user = await User.findOne({
+      $or: [{ email: lowerId }, { username: lowerId }]
+    }).populate('participantRef');
+
+    // 2. Fallback lookup via Participant (email, phone, or fullName)
     if (!user) {
-      return res.status(401).json({ success: false, message: 'Invalid email or password.' });
+      const participant = await Participant.findOne({
+        $or: [
+          { email: lowerId },
+          { phone: rawIdentifier },
+          { fullName: { $regex: new RegExp(`^${escapedId}$`, 'i') } }
+        ]
+      });
+
+      if (participant) {
+        if (participant.userId) {
+          user = await User.findById(participant.userId).populate('participantRef');
+        }
+        if (!user) {
+          user = await User.findOne({ participantRef: participant._id }).populate('participantRef');
+        }
+
+        // Auto-provision User account on first login for participants imported/registered without credentials
+        // when password matches their registered phone number
+        if (!user && participant.phone && password.trim() === participant.phone.trim()) {
+          const slugBase = participant.fullName.toLowerCase().replace(/[^a-z0-9]/g, '') || 'player';
+          const uniqueSuffix = String(participant._id).slice(-4);
+          const generatedEmail = participant.email
+            ? participant.email.toLowerCase().trim()
+            : `${slugBase}.${uniqueSuffix}@carrom.edu`;
+
+          user = await User.create({
+            username: `${slugBase}_${uniqueSuffix}`.toLowerCase(),
+            email: generatedEmail,
+            password: participant.phone.trim(),
+            role: 'participant',
+            fullName: participant.fullName,
+            participantRef: participant._id
+          });
+
+          participant.userId = user._id;
+          if (!participant.email) participant.email = generatedEmail;
+          await participant.save();
+          user = await User.findById(user._id).populate('participantRef');
+        }
+      }
+    }
+
+    if (!user) {
+      return res.status(401).json({ success: false, message: 'Invalid email/name/phone or password.' });
     }
 
     const isMatch = await user.comparePassword(password);
     if (!isMatch) {
-      return res.status(401).json({ success: false, message: 'Invalid email or password.' });
+      return res.status(401).json({ success: false, message: 'Invalid email/name/phone or password.' });
     }
 
     const token = generateToken(user);

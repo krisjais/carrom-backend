@@ -245,7 +245,9 @@ const submitRegistration = async (req, res, next) => {
       fullName,
       gender,
       department,
+      email,
       phone,
+      password,
       participateSingles,
       participateDoubles,
       participateMixedDoubles,
@@ -303,6 +305,8 @@ const submitRegistration = async (req, res, next) => {
     const cleanFullName = fullName.replace(/\s+/g, ' ').trim();
     const cleanDepartment = department.replace(/\s+/g, ' ').trim();
     const cleanPhone = String(phone || '').trim();
+    const cleanEmail = String(email || '').toLowerCase().trim();
+    const cleanPassword = String(password || '').trim();
 
     let tournId = tournamentId;
     if (!tournId) {
@@ -431,10 +435,32 @@ const submitRegistration = async (req, res, next) => {
         gender,
         studentId: '',
         department: cleanDepartment,
-        email: '',
+        email: cleanEmail,
         phone: cleanPhone,
         isApproved: false
       });
+    }
+
+    // Create/link login User account if email, phone, or password was provided
+    if (!participant.userId && (cleanPassword || cleanEmail || cleanPhone)) {
+      const loginPassword = cleanPassword || cleanPhone || 'carrom2026';
+      const slugBase = cleanFullName.toLowerCase().replace(/[^a-z0-9]/g, '') || 'player';
+      const fallbackEmail = `${slugBase}.${String(participant._id).slice(-4)}@carrom.edu`;
+      const loginEmail = cleanEmail || fallbackEmail;
+      const existingUser = await User.findOne({ email: loginEmail });
+      if (!existingUser) {
+        const user = await User.create({
+          username: `${slugBase}_${String(participant._id).slice(-4)}`.toLowerCase(),
+          email: loginEmail,
+          password: loginPassword,
+          role: 'participant',
+          fullName: cleanFullName,
+          participantRef: participant._id
+        });
+        participant.userId = user._id;
+        if (!participant.email) participant.email = loginEmail;
+        await participant.save();
+      }
     }
 
     const registration = await Registration.create({
