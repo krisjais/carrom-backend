@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const ChessMatch = require('../models/ChessMatch');
+const ChessPlayer = require('../models/ChessPlayer');
 const ChessBoard = require('../models/ChessBoard');
 const memoryStore = require('../utils/chessMemoryDb');
 const { getConfiguration, calculateMaterialScore } = require('./scoringService');
