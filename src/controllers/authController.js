@@ -1,7 +1,6 @@
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 const Participant = require('../models/Participant');
-const { allocateUniqueCredentials } = require('../utils/carromCredentials');
 
 const generateToken = (user) => {
   return jwt.sign(
@@ -26,20 +25,15 @@ const login = async (req, res, next) => {
     const lowerId = rawIdentifier.toLowerCase();
     const escapedId = rawIdentifier.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-    // 1. Direct lookup on User by email or username (supports stripping CAR- prefix too)
-    const strippedCarPrefix = lowerId.replace(/^car-/, '');
+    // 1. Direct lookup on User by email or username
     let user = await User.findOne({
-      $or: [{ email: lowerId }, { username: lowerId }, { username: strippedCarPrefix }]
+      $or: [{ email: lowerId }, { username: lowerId }]
     }).populate('participantRef');
 
-    // 2. Fallback lookup via Participant (studentId, email, phone, or fullName)
+    // 2. Fallback lookup via Participant (email, phone, or fullName)
     if (!user) {
-      const upperId = rawIdentifier.toUpperCase();
       const participant = await Participant.findOne({
         $or: [
-          { studentId: upperId },
-          { studentId: `CAR-${strippedCarPrefix.toUpperCase()}` },
-          { studentId: { $regex: new RegExp(`^${escapedId}$`, 'i') } },
           { email: lowerId },
           { phone: rawIdentifier },
           { fullName: { $regex: new RegExp(`^${escapedId}$`, 'i') } }
@@ -55,29 +49,24 @@ const login = async (req, res, next) => {
         }
 
         // Auto-provision User account on first login for participants imported/registered without credentials
-        const expectedSlug = (participant.studentId ? participant.studentId.replace(/^CAR-/i, '') : participant.fullName.split(/\s+/)[0]).toLowerCase().replace(/[^a-z0-9]/g, '');
-        const expectedNamePass = expectedSlug ? `${expectedSlug}123` : '';
-        const matchesProvisionPass =
-          (participant.phone && password.trim() === participant.phone.trim()) ||
-          (expectedNamePass && password.trim() === expectedNamePass);
-
-        if (!user && matchesProvisionPass) {
-          const creds = await allocateUniqueCredentials(participant.fullName, { User, Participant });
+        // when password matches their registered phone number
+        if (!user && participant.phone && password.trim() === participant.phone.trim()) {
+          const slugBase = participant.fullName.toLowerCase().replace(/[^a-z0-9]/g, '') || 'player';
+          const uniqueSuffix = String(participant._id).slice(-4);
           const generatedEmail = participant.email
             ? participant.email.toLowerCase().trim()
-            : creds.email;
+            : `${slugBase}.${uniqueSuffix}@carrom.edu`;
 
           user = await User.create({
-            username: creds.username,
+            username: `${slugBase}_${uniqueSuffix}`.toLowerCase(),
             email: generatedEmail,
-            password: expectedNamePass || participant.phone.trim(),
+            password: participant.phone.trim(),
             role: 'participant',
             fullName: participant.fullName,
             participantRef: participant._id
           });
 
           participant.userId = user._id;
-          if (!participant.studentId) participant.studentId = creds.studentId;
           if (!participant.email) participant.email = generatedEmail;
           await participant.save();
           user = await User.findById(user._id).populate('participantRef');
@@ -86,12 +75,12 @@ const login = async (req, res, next) => {
     }
 
     if (!user) {
-      return res.status(401).json({ success: false, message: 'Invalid Player ID, email, name, or password.' });
+      return res.status(401).json({ success: false, message: 'Invalid email/name/phone or password.' });
     }
 
     const isMatch = await user.comparePassword(password);
     if (!isMatch) {
-      return res.status(401).json({ success: false, message: 'Invalid Player ID, email, name, or password.' });
+      return res.status(401).json({ success: false, message: 'Invalid email/name/phone or password.' });
     }
 
     const token = generateToken(user);
@@ -148,12 +137,11 @@ const registerParticipant = async (req, res, next) => {
       return res.status(400).json({ success: false, message: 'A participant with this email or name already exists.' });
     }
 
-    // 1. Create Participant with name-based Player ID
-    const creds = await allocateUniqueCredentials(fullName, { User, Participant });
+    // 1. Create Participant
     const participant = await Participant.create({
       fullName: fullName.trim(),
       gender,
-      studentId: creds.studentId,
+      studentId: '',
       email: email.toLowerCase().trim(),
       phone: phone.trim(),
       department: department.trim(),
@@ -161,8 +149,9 @@ const registerParticipant = async (req, res, next) => {
     });
 
     // 2. Create User
+    const username = email.split('@')[0] + '_' + Math.floor(100 + Math.random() * 900);
     const user = await User.create({
-      username: creds.username,
+      username: username.toLowerCase(),
       email: email.toLowerCase().trim(),
       password,
       role: 'participant',

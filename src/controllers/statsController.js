@@ -258,8 +258,6 @@ const getParticipantsDirectory = async (req, res, next) => {
       entries.push({
         _id: pid,
         registrationId: reg._id,
-        studentId: p.studentId || '',
-        email: p.email || '',
         fullName: p.fullName,
         gender: p.gender,
         department: p.department,
@@ -316,7 +314,6 @@ const getParticipantsDirectory = async (req, res, next) => {
       entries = entries.filter(
         (e) =>
           e.fullName.toLowerCase().includes(q) ||
-          (e.studentId && e.studentId.toLowerCase().includes(q)) ||
           (e.department && e.department.toLowerCase().includes(q)) ||
           (e.doublesPartner?.partnerName && e.doublesPartner.partnerName.toLowerCase().includes(q)) ||
           (e.mixedDoublesPartner?.partnerName && e.mixedDoublesPartner.partnerName.toLowerCase().includes(q))
