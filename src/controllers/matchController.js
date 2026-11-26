@@ -83,10 +83,11 @@ const createAdditionalMatch = async (req, res, next) => {
       return res.status(404).json({ success: false, message: 'No active tournament found.' });
     }
     const existingMatchCount = await Match.countDocuments({ tournamentId: tournament._id, category });
-    if (existingMatchCount === 0) {
+    const isFirstManualMatch = existingMatchCount === 0;
+    if (isFirstManualMatch && !hasTeam2) {
       return res.status(400).json({
         success: false,
-        message: 'Generate the draw for this category before adding a late entry.'
+        message: 'Choose two approved entries to create the first manual match.'
       });
     }
 
@@ -104,7 +105,9 @@ const createAdditionalMatch = async (req, res, next) => {
       });
     }
 
-    await attachManualMatchesToActiveRound(tournament._id, category);
+    if (!isFirstManualMatch) {
+      await attachManualMatchesToActiveRound(tournament._id, category);
+    }
 
     const categoryMatches = await Match.find({ tournamentId: tournament._id, category })
       .sort({ roundNumber: 1, matchIndexInRound: 1 });
@@ -133,7 +136,17 @@ const createAdditionalMatch = async (req, res, next) => {
       }
     }
 
-    const currentRoundNumber = getCurrentBracketRoundNumber(categoryMatches);
+    const currentRoundNumber = isFirstManualMatch
+      ? 1
+      : getCurrentBracketRoundNumber(categoryMatches)
+        || categoryMatches
+          .filter((match) => !match.isBye && match.status !== 'completed')
+          .map((match) => match.roundNumber)
+          .sort((a, b) => a - b)[0]
+        || categoryMatches
+          .filter((match) => !match.isBye)
+          .map((match) => match.roundNumber)
+          .sort((a, b) => b - a)[0];
     if (!currentRoundNumber) {
       return res.status(400).json({
         success: false,
@@ -203,15 +216,17 @@ const createAdditionalMatch = async (req, res, next) => {
       .populate({ path: 'winnerTeam', populate: [{ path: 'player1' }, { path: 'player2' }] });
 
     await AuditLog.create({
-      action: 'CREATE_ADDITIONAL_MATCH',
+      action: isFirstManualMatch ? 'CREATE_MANUAL_MATCH' : 'CREATE_ADDITIONAL_MATCH',
       performedBy: req.user._id,
       performedByName: req.user.fullName || 'Admin',
       entityType: 'Match',
       entityId: match._id.toString(),
-      details: { category, matchNumber: match.matchNumber, team1Id, team2Id: hasTeam2 ? team2Id : null, isBye: !hasTeam2 },
-      reason: hasTeam2
-        ? `Added a late-entry ${category.replace('_', ' ')} match to ${currentRoundName}.`
-        : `Added a late-entry BYE for ${category.replace('_', ' ')} to ${currentRoundName}.`
+      details: { category, matchNumber: match.matchNumber, team1Id, team2Id: hasTeam2 ? team2Id : null, isBye: !hasTeam2, isFirstManualMatch },
+      reason: isFirstManualMatch
+        ? `Created the first manual ${category.replace('_', ' ')} match in ${currentRoundName}; other entries remain unpaired.`
+        : hasTeam2
+          ? `Added a manual ${category.replace('_', ' ')} match to ${currentRoundName}.`
+          : `Added a manual BYE for ${category.replace('_', ' ')} to ${currentRoundName}.`
     });
 
     emitMatchUpdate(match._id, 'carrom:match_updated', populatedMatch);
@@ -219,9 +234,11 @@ const createAdditionalMatch = async (req, res, next) => {
 
     res.status(201).json({
       success: true,
-      message: hasTeam2
-        ? `Late-entry Match #${match.matchNumber} added to ${currentRoundName}. Its winner will advance through the bracket. The live match continues uninterrupted.`
-        : `Late entry added as a BYE in ${currentRoundName}. The entry will advance automatically when the round is ready.`,
+      message: isFirstManualMatch
+        ? `Manual Match #${match.matchNumber} created in ${currentRoundName}. Other approved entries remain unpaired until you add their matches.`
+        : hasTeam2
+          ? `Manual Match #${match.matchNumber} added to ${currentRoundName}. Its winner will advance through the bracket. The live match continues uninterrupted.`
+          : `Late entry added as a BYE in ${currentRoundName}. The entry will advance automatically when the round is ready.`,
       match: populatedMatch
     });
   } catch (error) {

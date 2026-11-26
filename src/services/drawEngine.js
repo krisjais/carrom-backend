@@ -248,7 +248,7 @@ const shuffleArray = (array) => {
  * - Subsequent round match placeholders are created and will be dynamically populated
  *   and reshuffled as each round completes.
  */
-const generateDynamicBracket = async (tournamentId, category, adminUserId = null, manualPairTeamIds = null) => {
+const generateDynamicBracket = async (tournamentId, category, adminUserId = null) => {
   // 1. Fetch approved teams for category
   const teams = await Team.find({
     tournamentId,
@@ -278,27 +278,8 @@ const generateDynamicBracket = async (tournamentId, category, adminUserId = null
   const roundsPlan = calculateRoundsPlan(N);
   const totalRounds = roundsPlan.length;
 
-  // 5. Shuffle approved teams for Round 1, keeping an optional admin-selected pair together.
-  let shuffledTeams;
-  if (manualPairTeamIds) {
-    const selectedIds = manualPairTeamIds.map((id) => String(id));
-    if (selectedIds.length !== 2 || selectedIds[0] === selectedIds[1]) {
-      throw new Error('Choose two different approved entries for the manual pairing.');
-    }
-
-    const manualPair = selectedIds.map((teamId) => teams.find((team) => String(team._id) === teamId));
-    if (manualPair.some((team) => !team)) {
-      throw new Error('Both manual pairing entries must be approved in this category and tournament.');
-    }
-
-    const manualIds = new Set(selectedIds);
-    shuffledTeams = [
-      ...manualPair,
-      ...shuffleArray(teams.filter((team) => !manualIds.has(String(team._id))))
-    ];
-  } else {
-    shuffledTeams = shuffleArray(teams);
-  }
+  // 5. Shuffle approved teams for Round 1
+  const shuffledTeams = shuffleArray(teams);
 
   // 6. Pre-create Match documents for all rounds
   const roundMatchesMap = {};
@@ -321,7 +302,6 @@ const generateDynamicBracket = async (tournamentId, category, adminUserId = null
         team1: null,
         team2: null,
         isBye: false,
-        isManual: Boolean(manualPairTeamIds && r === 1 && i === 0),
         winnerTeam: null,
         nextMatchId: null,
         nextMatchSlot: null,
@@ -414,7 +394,7 @@ const generateDynamicBracket = async (tournamentId, category, adminUserId = null
 
   // 9. Record audit log
   await AuditLog.create({
-    action: manualPairTeamIds ? 'GENERATE_MANUAL_DRAW' : 'GENERATE_DYNAMIC_DRAW',
+    action: 'GENERATE_DYNAMIC_DRAW',
     performedBy: adminUserId,
     entityType: 'CategoryDraw',
     entityId: category,
@@ -423,12 +403,9 @@ const generateDynamicBracket = async (tournamentId, category, adminUserId = null
       totalTeams: N,
       totalRounds,
       roundsPlan,
-      matchesGenerated: allMatchesToSave.length,
-      manualPairTeamIds: manualPairTeamIds || null
+      matchesGenerated: allMatchesToSave.length
     },
-    reason: manualPairTeamIds
-      ? `Generated a bracket with an admin-selected first-round pairing for ${N} teams across ${totalRounds} rounds.`
-      : `Generated dynamic draw for ${N} teams across ${totalRounds} rounds.`
+    reason: `Generated dynamic draw for ${N} teams across ${totalRounds} rounds.`
   });
 
   return {
