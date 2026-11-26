@@ -6,6 +6,7 @@ const Match = require('../models/Match');
 const AuditLog = require('../models/AuditLog');
 const User = require('../models/User');
 const { emitCarromLive } = require('../socket');
+const { allocateUniqueCredentials } = require('../utils/carromCredentials');
 
 const {
   validatePartnerRequest,
@@ -1742,16 +1743,29 @@ const adminAddPlayer = async (req, res, next) => {
       }
     }
 
-    // Create new Participant & Registration
+    // Create new Participant, User login credentials, & Registration
+    const creds = await allocateUniqueCredentials(cleanName, { User, Participant });
     participant = await Participant.create({
       fullName: cleanName,
       gender: normalizedGender,
-      studentId: '',
+      studentId: creds.studentId,
       department: cleanDept,
-      email: '',
+      email: creds.email,
       phone: cleanPhone,
       isApproved: false
     });
+
+    const userAccount = await User.create({
+      username: creds.username,
+      email: creds.email,
+      password: creds.password,
+      role: 'participant',
+      fullName: cleanName,
+      participantRef: participant._id
+    });
+
+    participant.userId = userAccount._id;
+    await participant.save();
 
     const registration = await Registration.create({
       participantId: participant._id,

@@ -7,6 +7,7 @@ const Team = require('../models/Team');
 const Match = require('../models/Match');
 const Announcement = require('../models/Announcement');
 const AuditLog = require('../models/AuditLog');
+const { buildFirstNameCounts, generateNameCredentials } = require('../utils/carromCredentials');
 
 const PARTICIPANTS_DATA = [
   { no: 1, fullName: 'Abdulla Shaikh', gender: 'male', department: 'IT', phone: '8454097769', participateSingles: true, participateDoubles: false, participateMixedDoubles: false, doublesPartnerName: '', mixedDoublesPartnerName: '' },
@@ -148,27 +149,17 @@ const seedBreakdownData = async (actor = null) => {
     await tournament.save();
   }
 
-  const usedSlugs = new Set();
-  const buildSlug = (fullName) => {
-    const base = String(fullName || 'player')
-      .toLowerCase()
-      .replace(/[^a-z0-9]/g, '');
-    let slug = base || 'player';
-    let suffix = 2;
-    while (usedSlugs.has(slug)) {
-      slug = `${base}${suffix}`;
-      suffix++;
-    }
-    usedSlugs.add(slug);
-    return slug;
-  };
+  const firstNameCounts = buildFirstNameCounts(PARTICIPANTS_DATA);
+  const usedKeys = new Set();
 
   const enrichedEntries = PARTICIPANTS_DATA.map((entry) => {
-    const slug = buildSlug(entry.fullName);
+    const creds = generateNameCredentials(entry.fullName, { firstNameCounts, usedKeys });
     return {
       ...entry,
-      username: slug,
-      email: `${slug}@carrom.edu`
+      studentId: creds.studentId,
+      username: creds.username,
+      email: creds.email,
+      defaultPassword: creds.password
     };
   });
 
@@ -176,7 +167,7 @@ const seedBreakdownData = async (actor = null) => {
     enrichedEntries.map((entry) => ({
       fullName: entry.fullName,
       gender: entry.gender,
-      studentId: '',
+      studentId: entry.studentId,
       department: entry.department,
       email: entry.email,
       phone: entry.phone,
@@ -189,11 +180,11 @@ const seedBreakdownData = async (actor = null) => {
     participantMap.set(doc.fullName, doc);
   });
 
-  // Provision participant login User accounts (default password = registered WhatsApp phone)
+  // Provision participant login User accounts (name-based Player ID & password: <name>123)
   const userDocs = await Promise.all(
     enrichedEntries.map(async (entry) => {
       const p = participantMap.get(entry.fullName);
-      const hashedPassword = await bcrypt.hash(entry.phone || 'carrom2026', 8);
+      const hashedPassword = await bcrypt.hash(entry.defaultPassword, 8);
       return {
         username: entry.username,
         email: entry.email,
