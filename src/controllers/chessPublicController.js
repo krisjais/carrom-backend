@@ -8,6 +8,7 @@ const memoryStore = require('../utils/chessMemoryDb');
 const { getConfiguration } = require('../services/scoringService');
 const { recalculateAllStandings } = require('../services/standingsService');
 const { emitMatchUpdate, emitChessLive } = require('../socket');
+const { generateChessNameCredentials } = require('../utils/chessCredentials');
 
 const isDbConnected = () => mongoose.connection.readyState === 1;
 
@@ -85,8 +86,8 @@ exports.registerPlayer = async (req, res, next) => {
         }
       }
 
-      const totalCount = await ChessPlayer.countDocuments();
-      const playerId = `CHS-${String(totalCount + 1).padStart(3, '0')}`;
+      const existingIds = (await ChessPlayer.find({}).select('playerId').lean()).map((p) => p.playerId);
+      const { playerId } = generateChessNameCredentials(fullName.trim(), existingIds);
 
       const player = await ChessPlayer.create({
         playerId,
@@ -122,7 +123,8 @@ exports.registerPlayer = async (req, res, next) => {
       });
     }
 
-    const playerId = `CHS-${String(memoryStore.players.length + 1).padStart(3, '0')}`;
+    const existingIds = memoryStore.players.map((p) => p.playerId);
+    const { playerId } = generateChessNameCredentials(fullName.trim(), existingIds);
     const salt = bcrypt.genSaltSync(10);
     const hashedPassword = bcrypt.hashSync(password.trim(), salt);
 
@@ -186,22 +188,28 @@ exports.playerLogin = async (req, res, next) => {
 
     const clean = rawInput.trim();
     const cleanLower = clean.toLowerCase();
+    const strippedPrefix = cleanLower.replace(/^chs-/, '');
+    const prefixedUpper = `CHS-${strippedPrefix.toUpperCase()}`;
+    const escapedClean = clean.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
     let player = null;
     if (isDbConnected()) {
-      // Find by exact Player ID (case-insensitive) OR Email OR Phone
+      // Find by Player ID (with or without CHS- prefix), Full Name, Email, or Phone
       player = await ChessPlayer.findOne({
         $or: [
-          { playerId: { $regex: new RegExp(`^${clean.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') } },
+          { playerId: { $regex: new RegExp(`^${escapedClean}$`, 'i') } },
+          { playerId: prefixedUpper },
           { email: cleanLower },
-          { phone: clean }
+          { phone: clean },
+          { fullName: { $regex: new RegExp(`^${escapedClean}$`, 'i') } }
         ]
       });
     } else {
       player = memoryStore.players.find(
-        p => (p.playerId && p.playerId.toLowerCase() === cleanLower) ||
+        p => (p.playerId && (p.playerId.toLowerCase() === cleanLower || p.playerId.toUpperCase() === prefixedUpper)) ||
              (p.email && p.email.toLowerCase() === cleanLower) ||
-             (p.phone && p.phone === clean)
+             (p.phone && p.phone === clean) ||
+             (p.fullName && p.fullName.toLowerCase() === cleanLower)
       );
     }
 

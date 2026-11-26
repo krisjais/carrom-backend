@@ -11,6 +11,7 @@ const { generateRoundPairings } = require('../services/pairingService');
 const { submitResult, overrideResult, startMatch, cancelMatch, createManualMatch, updateLiveCaptures } = require('../services/matchService');
 const { recalculateAllStandings } = require('../services/standingsService');
 const { emitMatchUpdate, emitChessLive } = require('../socket');
+const { generateChessNameCredentials } = require('../utils/chessCredentials');
 
 const isDbConnected = () => mongoose.connection.readyState === 1;
 
@@ -251,7 +252,7 @@ exports.updatePlayer = async (req, res, next) => {
 // Admin Create / Add Player Directly
 exports.createPlayer = async (req, res, next) => {
   try {
-    const { fullName, email, phone, department, status, password, plainPassword } = req.body;
+    const { fullName, playerId: requestedPlayerId, email, phone, department, status, password, plainPassword } = req.body;
 
     if (!fullName || !department) {
       return res.status(400).json({
@@ -263,13 +264,16 @@ exports.createPlayer = async (req, res, next) => {
     const cleanName = fullName.replace(/\s+/g, ' ').trim();
     const cleanDept = department.trim();
     const cleanPhone = phone ? phone.trim() : '';
-    let targetStatus = status || 'Approved';
-    const initPassword = (password || plainPassword || 'chess123').trim();
+    const targetStatus = status || 'Approved';
+    const explicitPassword = (password || plainPassword || '').trim();
 
     if (isDbConnected()) {
-      const totalCount = await ChessPlayer.countDocuments();
-      let playerId = `CHS-${String(totalCount + 1).padStart(3, '0')}`;
-      let candidateEmail = email ? email.toLowerCase().trim() : `${cleanName.toLowerCase().replace(/[^a-z0-9]/g, '')}_${Date.now().toString().slice(-4)}@tournament.local`;
+      const existingIds = (await ChessPlayer.find({}).select('playerId').lean()).map((p) => p.playerId);
+      const nameCreds = generateChessNameCredentials(cleanName, existingIds);
+
+      let playerId = requestedPlayerId ? requestedPlayerId.trim().toUpperCase() : nameCreds.playerId;
+      const initPassword = explicitPassword || nameCreds.password;
+      const candidateEmail = email ? email.toLowerCase().trim() : nameCreds.email;
 
       if (email) {
         const existing = await ChessPlayer.findOne({ email: candidateEmail });
@@ -281,12 +285,14 @@ exports.createPlayer = async (req, res, next) => {
         }
       }
 
-      let existsId = await ChessPlayer.findOne({ playerId });
-      let counter = totalCount + 1;
-      while (existsId) {
-        counter++;
-        playerId = `CHS-${String(counter).padStart(3, '0')}`;
-        existsId = await ChessPlayer.findOne({ playerId });
+      if (requestedPlayerId) {
+        const existingById = await ChessPlayer.findOne({ playerId });
+        if (existingById) {
+          return res.status(400).json({
+            success: false,
+            message: `Player ID ${playerId} already exists.`
+          });
+        }
       }
 
       const player = await ChessPlayer.create({
@@ -310,9 +316,11 @@ exports.createPlayer = async (req, res, next) => {
     }
 
     // In-Memory Fallback
-    const totalCount = memoryStore.players.length;
-    let playerId = `CHS-${String(totalCount + 1).padStart(3, '0')}`;
-    let candidateEmail = email ? email.toLowerCase().trim() : `${cleanName.toLowerCase().replace(/[^a-z0-9]/g, '')}_${Date.now().toString().slice(-4)}@tournament.local`;
+    const existingIds = memoryStore.players.map((p) => p.playerId);
+    const nameCreds = generateChessNameCredentials(cleanName, existingIds);
+    const playerId = requestedPlayerId ? requestedPlayerId.trim().toUpperCase() : nameCreds.playerId;
+    const initPassword = explicitPassword || nameCreds.password;
+    const candidateEmail = email ? email.toLowerCase().trim() : nameCreds.email;
     const salt = bcrypt.genSaltSync(10);
 
     const newPlayer = {
