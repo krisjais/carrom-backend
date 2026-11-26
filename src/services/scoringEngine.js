@@ -143,13 +143,31 @@ const confirmMatchWinner = async (matchId, adminUser, overrideWinnerTeamId = nul
     throw new Error('Match not found.');
   }
 
-  if (!match.team1 || !match.team2) {
-    throw new Error('Cannot confirm match: Both teams must be determined.');
+  if (match.isBye) {
+    throw new Error('Automatic BYE matches do not need a manual result.');
+  }
+
+  const onlyPresentTeam = match.team1 || match.team2;
+  const isWalkover = Boolean(onlyPresentTeam) && (!match.team1 || !match.team2);
+  if (isWalkover && !overrideWinnerTeamId) {
+    throw new Error('Choose the remaining entry to award a walkover.');
+  }
+  if ((!match.team1 || !match.team2) && !isWalkover) {
+    throw new Error('Cannot confirm match: no entry is available to award the win.');
   }
 
   let winningTeamId = overrideWinnerTeamId;
 
-  if (!winningTeamId) {
+  if (isWalkover) {
+    if (String(onlyPresentTeam._id) !== String(overrideWinnerTeamId)) {
+      throw new Error('A walkover can only be awarded to the entry present in this match.');
+    }
+    winningTeamId = onlyPresentTeam._id;
+    if (!match.team1) match.team1 = null;
+    if (!match.team2) match.team2 = null;
+  } else if (winningTeamId && ![String(match.team1._id), String(match.team2._id)].includes(String(winningTeamId))) {
+    throw new Error('Selected winner must be one of the two entries in this match.');
+  } else if (!winningTeamId) {
     const evaluation = evaluateMatchBoards(match.boards);
     if (evaluation.isMatchDecided) {
       winningTeamId = evaluation.matchWinnerSlot === 'team1' ? match.team1._id : match.team2._id;
@@ -172,6 +190,7 @@ const confirmMatchWinner = async (matchId, adminUser, overrideWinnerTeamId = nul
 
   match.winnerTeam = winningTeamId;
   match.status = 'completed';
+  match.isWalkover = isWalkover;
   const now = new Date();
   match.actualEndTime = now;
 
@@ -179,7 +198,10 @@ const confirmMatchWinner = async (matchId, adminUser, overrideWinnerTeamId = nul
   const extraMins = Number(match.extraTimeMinutes || 0);
   const allowedCapSeconds = (roundMins + extraMins) * 60;
 
-  if (match.actualStartTime) {
+  if (isWalkover) {
+    match.actualStartTime = null;
+    match.elapsedTimeSeconds = 0;
+  } else if (match.actualStartTime) {
     let elapsed = match.timeElapsedBeforePause && match.timeElapsedBeforePause > 0
       ? Math.round(match.timeElapsedBeforePause)
       : Math.max(1, Math.floor((now.getTime() - new Date(match.actualStartTime).getTime()) / 1000));
@@ -227,9 +249,12 @@ const confirmMatchWinner = async (matchId, adminUser, overrideWinnerTeamId = nul
       winnerTeam: winningTeamId,
       finalScore: match.finalScore,
       actualEndTime: match.actualEndTime,
-      roundAdvanced
+      roundAdvanced,
+      isWalkover
     },
-    reason: `Confirmed match winner for Match #${match.matchNumber} on Main Carrom Board.`
+    reason: isWalkover
+      ? `Awarded a walkover to the remaining entry in Match #${match.matchNumber}.`
+      : `Confirmed match winner for Match #${match.matchNumber} on Main Carrom Board.`
   });
 
   return {
@@ -278,6 +303,7 @@ const correctMatchResult = async (matchId, correctedData, reason, adminUser) => 
   };
 
   let newWinnerId = null;
+  match.isWalkover = false;
   if (evaluation.isMatchDecided) {
     newWinnerId = evaluation.matchWinnerSlot === 'team1' ? match.team1 : match.team2;
     match.winnerTeam = newWinnerId;

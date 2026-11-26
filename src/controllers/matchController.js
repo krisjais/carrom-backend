@@ -626,7 +626,7 @@ const confirmMatch = async (req, res, next) => {
     const { winnerTeamId } = req.body || {};
     const result = await confirmMatchWinner(id, req.user, winnerTeamId);
 
-    if (result.match) {
+    if (result.match && !result.match.isWalkover) {
       await CarromBoard.findOneAndUpdate(
         { tournamentId: result.match.tournamentId, boardNumber: result.match.carromBoardNumber || 1 },
         { status: 'available', currentMatchId: null }
@@ -638,7 +638,9 @@ const confirmMatch = async (req, res, next) => {
 
     res.json({
       success: true,
-      message: 'Match winner confirmed and advanced to bracket.',
+      message: result.match.isWalkover
+        ? 'Walkover awarded. The remaining entry advances when the round is ready.'
+        : 'Match winner confirmed and advanced to bracket.',
       match: result.match,
       roundAdvanced: result.roundAdvanced,
       nextReadyMatch: result.nextReadyMatch
