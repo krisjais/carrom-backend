@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const bcrypt = require('bcryptjs');
 const ChessPlayer = require('../models/ChessPlayer');
 const ChessMatch = require('../models/ChessMatch');
 const ChessRound = require('../models/ChessRound');
@@ -142,18 +143,35 @@ exports.getAdminPlayers = async (req, res, next) => {
 exports.updatePlayer = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { fullName, department, status, phone, adminNotes, password, newPassword, plainPassword } = req.body;
+    const { fullName, email, department, status, phone, adminNotes, password, newPassword, plainPassword } = req.body;
     const rawPassword = (newPassword || password || plainPassword || '').trim();
+    const cleanEmail = email !== undefined ? String(email).toLowerCase().trim() : undefined;
 
     if (isDbConnected()) {
-      const player = await ChessPlayer.findById(id);
+      const player = mongoose.Types.ObjectId.isValid(id)
+        ? await ChessPlayer.findById(id)
+        : await ChessPlayer.findOne({ playerId: id });
       if (!player) {
         return res.status(404).json({ success: false, message: 'Player not found.' });
       }
 
-      if (fullName) player.fullName = fullName.trim();
-      if (department) player.department = department.trim();
-      if (phone !== undefined) player.phone = phone.trim();
+      if (cleanEmail !== undefined && cleanEmail.length > 0 && cleanEmail !== player.email) {
+        const duplicateEmail = await ChessPlayer.findOne({
+          email: cleanEmail,
+          _id: { $ne: player._id }
+        });
+        if (duplicateEmail) {
+          return res.status(400).json({
+            success: false,
+            message: `Another player (${duplicateEmail.fullName}) already uses ${cleanEmail}.`
+          });
+        }
+        player.email = cleanEmail;
+      }
+
+      if (fullName && fullName.trim()) player.fullName = fullName.replace(/\s+/g, ' ').trim();
+      if (department && department.trim()) player.department = department.trim();
+      if (phone !== undefined) player.phone = String(phone).trim();
       if (adminNotes !== undefined) player.adminNotes = adminNotes;
       if (rawPassword) {
         player.password = rawPassword;
@@ -172,7 +190,7 @@ exports.updatePlayer = async (req, res, next) => {
 
       return res.json({
         success: true,
-        message: rawPassword
+        message: rawPassword && !fullName && cleanEmail === undefined && !department
           ? `Password for ${player.fullName} updated successfully to '${rawPassword}'.`
           : `Player ${player.fullName} updated successfully.`,
         data: player
@@ -184,9 +202,23 @@ exports.updatePlayer = async (req, res, next) => {
       return res.status(404).json({ success: false, message: 'Player not found.' });
     }
 
-    if (fullName) player.fullName = fullName.trim();
-    if (department) player.department = department.trim();
-    if (phone !== undefined) player.phone = phone.trim();
+    if (cleanEmail !== undefined && cleanEmail.length > 0 && cleanEmail !== player.email) {
+      const duplicateEmail = memoryStore.players.find(
+        p => p.email === cleanEmail && p._id !== player._id
+      );
+      if (duplicateEmail) {
+        return res.status(400).json({
+          success: false,
+          message: `Another player (${duplicateEmail.fullName}) already uses ${cleanEmail}.`
+        });
+      }
+      player.email = cleanEmail;
+    }
+
+    if (fullName && fullName.trim()) player.fullName = fullName.replace(/\s+/g, ' ').trim();
+    if (department && department.trim()) player.department = department.trim();
+    if (phone !== undefined) player.phone = String(phone).trim();
+    if (adminNotes !== undefined) player.adminNotes = adminNotes;
     if (rawPassword) {
       const salt = bcrypt.genSaltSync(10);
       player.password = bcrypt.hashSync(rawPassword, salt);
@@ -203,12 +235,15 @@ exports.updatePlayer = async (req, res, next) => {
 
     res.json({
       success: true,
-      message: rawPassword
+      message: rawPassword && !fullName && cleanEmail === undefined && !department
         ? `Password for ${player.fullName} updated successfully to '${rawPassword}'.`
         : `Player ${player.fullName} updated successfully.`,
       data: player
     });
   } catch (err) {
+    if (err.name === 'ValidationError' || err.code === 11000) {
+      return res.status(400).json({ success: false, message: err.message });
+    }
     next(err);
   }
 };
