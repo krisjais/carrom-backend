@@ -721,6 +721,7 @@ exports.importChessPlayers = async (req, res, next) => {
     if (isDbConnected()) {
       const existingPlayers = await ChessPlayer.find().select('email playerId');
       const existingEmails = new Set(existingPlayers.map(p => p.email.toLowerCase()));
+      const existingIds = existingPlayers.map(p => p.playerId).filter(Boolean);
       let currentMaxCount = existingPlayers.length;
 
       for (let i = 0; i < rawPlayers.length; i++) {
@@ -737,8 +738,8 @@ exports.importChessPlayers = async (req, res, next) => {
           continue;
         }
 
-        // Generate synthetic email if empty
-        const finalEmail = email || `${fullName.toLowerCase().replace(/[^a-z0-9]/g, '')}_${Date.now()}_${i}@chess.edu`;
+        const nameCreds = generateChessNameCredentials(fullName, existingIds);
+        const finalEmail = email || nameCreds.email;
 
         if (existingEmails.has(finalEmail)) {
           skipped.push({ row: rowNum, name: fullName, email: finalEmail, reason: 'Duplicate email already exists.' });
@@ -746,9 +747,10 @@ exports.importChessPlayers = async (req, res, next) => {
         }
 
         currentMaxCount++;
-        const playerId = `CHS-${String(currentMaxCount).padStart(3, '0')}`;
+        const playerId = nameCreds.playerId;
+        existingIds.push(playerId);
         const department = normalizeDepartment(rawDept);
-        const playerPassword = (item.password || item.plainPassword || 'chess123').trim();
+        const playerPassword = (item.password || item.plainPassword || nameCreds.password).trim();
 
         try {
           const newDoc = await ChessPlayer.create({

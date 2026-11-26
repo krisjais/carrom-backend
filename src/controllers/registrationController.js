@@ -14,6 +14,64 @@ const {
   ensurePartnerRegistration
 } = require('../services/partnerValidationEngine');
 
+const ensureParticipantUserAccount = async ({ participant, email = '', password = '', phone = '' }) => {
+  if (!participant) return null;
+  const cleanEmail = String(email || participant.email || '').toLowerCase().trim();
+  const cleanPassword = String(password || '').trim();
+  const cleanPhone = String(phone || participant.phone || '').trim();
+
+  if (!cleanPassword && !cleanEmail && !cleanPhone) return null;
+
+  const slugBase = String(participant.fullName || 'player').toLowerCase().replace(/[^a-z0-9]/g, '') || 'player';
+  const fallbackEmail = `${slugBase}.${String(participant._id).slice(-4)}@carrom.edu`;
+  const loginEmail = cleanEmail || fallbackEmail;
+  const loginPassword = cleanPassword || cleanPhone || 'carrom2026';
+
+  let user = participant.userId ? await User.findById(participant.userId) : null;
+  if (!user) {
+    user = await User.findOne({
+      $or: [{ participantRef: participant._id }, { email: loginEmail }]
+    });
+  }
+
+  if (user) {
+    if (cleanEmail && cleanEmail !== user.email) {
+      const conflict = await User.findOne({ email: cleanEmail, _id: { $ne: user._id } });
+      if (!conflict) user.email = cleanEmail;
+    }
+    if (cleanPassword) {
+      user.password = cleanPassword;
+    }
+    if (!user.participantRef) {
+      user.participantRef = participant._id;
+    }
+    await user.save();
+  } else {
+    user = await User.create({
+      username: `${slugBase}_${String(participant._id).slice(-4)}`.toLowerCase(),
+      email: loginEmail,
+      password: loginPassword,
+      role: 'participant',
+      fullName: participant.fullName,
+      participantRef: participant._id
+    });
+  }
+
+  let updatedParticipant = false;
+  if (!participant.userId || participant.userId.toString() !== user._id.toString()) {
+    participant.userId = user._id;
+    updatedParticipant = true;
+  }
+  if (!participant.email || (cleanEmail && participant.email.toLowerCase() !== cleanEmail)) {
+    participant.email = user.email;
+    updatedParticipant = true;
+  }
+  if (updatedParticipant) {
+    await participant.save();
+  }
+  return user;
+};
+
 // Global helpers for participation and partner name sanitization
 const sanitizePartnerName = (val) => {
   if (!val) return '';
@@ -391,7 +449,17 @@ const submitRegistration = async (req, res, next) => {
           if (cleanPhone && !participant.phone) {
             participant.phone = cleanPhone;
           }
+          if (cleanEmail && (!participant.email || participant.email.endsWith('@carrom.edu'))) {
+            participant.email = cleanEmail;
+          }
           await participant.save();
+
+          await ensureParticipantUserAccount({
+            participant,
+            email: cleanEmail,
+            password: cleanPassword,
+            phone: cleanPhone
+          });
 
           if (isDoubles && finalDoublesPartner) {
             await ensurePartnerRegistration({
@@ -442,26 +510,12 @@ const submitRegistration = async (req, res, next) => {
     }
 
     // Create/link login User account if email, phone, or password was provided
-    if (!participant.userId && (cleanPassword || cleanEmail || cleanPhone)) {
-      const loginPassword = cleanPassword || cleanPhone || 'carrom2026';
-      const slugBase = cleanFullName.toLowerCase().replace(/[^a-z0-9]/g, '') || 'player';
-      const fallbackEmail = `${slugBase}.${String(participant._id).slice(-4)}@carrom.edu`;
-      const loginEmail = cleanEmail || fallbackEmail;
-      const existingUser = await User.findOne({ email: loginEmail });
-      if (!existingUser) {
-        const user = await User.create({
-          username: `${slugBase}_${String(participant._id).slice(-4)}`.toLowerCase(),
-          email: loginEmail,
-          password: loginPassword,
-          role: 'participant',
-          fullName: cleanFullName,
-          participantRef: participant._id
-        });
-        participant.userId = user._id;
-        if (!participant.email) participant.email = loginEmail;
-        await participant.save();
-      }
-    }
+    await ensureParticipantUserAccount({
+      participant,
+      email: cleanEmail,
+      password: cleanPassword,
+      phone: cleanPhone
+    });
 
     const registration = await Registration.create({
       participantId: participant._id,
@@ -1528,6 +1582,8 @@ const adminAddPlayer = async (req, res, next) => {
       fullName,
       gender,
       department,
+      email,
+      password,
       phone,
       participateSingles,
       participateDoubles,
@@ -1742,15 +1798,25 @@ const adminAddPlayer = async (req, res, next) => {
       }
     }
 
+    const cleanEmailInput = String(email || '').toLowerCase().trim();
+    const cleanPassInput = String(password || '').trim();
+
     // Create new Participant & Registration
     participant = await Participant.create({
       fullName: cleanName,
       gender: normalizedGender,
       studentId: '',
       department: cleanDept,
-      email: '',
+      email: cleanEmailInput,
       phone: cleanPhone,
       isApproved: false
+    });
+
+    await ensureParticipantUserAccount({
+      participant,
+      email: cleanEmailInput,
+      password: cleanPassInput,
+      phone: cleanPhone
     });
 
     const registration = await Registration.create({

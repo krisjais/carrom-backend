@@ -4,6 +4,8 @@ const bcrypt = require('bcryptjs');
 const ChessPlayer = require('../models/ChessPlayer');
 const ChessMatch = require('../models/ChessMatch');
 const ChessRound = require('../models/ChessRound');
+const User = require('../models/User');
+const Participant = require('../models/Participant');
 const memoryStore = require('../utils/chessMemoryDb');
 const { getConfiguration } = require('../services/scoringService');
 const { recalculateAllStandings } = require('../services/standingsService');
@@ -194,12 +196,12 @@ exports.playerLogin = async (req, res, next) => {
 
     let player = null;
     if (isDbConnected()) {
-      // Find by Player ID (with or without CHS- prefix), Full Name, Email, or Phone
+      // Find by Player ID (with or without CHS- prefix), Full Name, Email (case-insensitive), or Phone
       player = await ChessPlayer.findOne({
         $or: [
           { playerId: { $regex: new RegExp(`^${escapedClean}$`, 'i') } },
           { playerId: prefixedUpper },
-          { email: cleanLower },
+          { email: { $regex: new RegExp(`^${escapedClean}$`, 'i') } },
           { phone: clean },
           { fullName: { $regex: new RegExp(`^${escapedClean}$`, 'i') } }
         ]
@@ -214,6 +216,16 @@ exports.playerLogin = async (req, res, next) => {
     }
 
     if (!player) {
+      if (isDbConnected()) {
+        const carromMatch = await User.findOne({ email: cleanLower }) ||
+          await Participant.findOne({ email: { $regex: new RegExp(`^${escapedClean}$`, 'i') } });
+        if (carromMatch) {
+          return res.status(401).json({
+            success: false,
+            message: 'This email belongs to the Carrom Championship portal. Please sign in at Athlete Login (/participant/login).'
+          });
+        }
+      }
       return res.status(404).json({
         success: false,
         message: `No competitor profile found matching "${clean}". Please check your Player ID or register first.`
