@@ -71,6 +71,8 @@ router.patch('/matches/:id/live-score', chessAdminAuth, adminCtrl.updateLiveCapt
 router.patch('/chess/matches/:id/live-score', chessAdminAuth, adminCtrl.updateLiveCaptures);
 router.post('/matches/:id/result', chessAdminAuth, adminCtrl.submitMatchResult);
 router.post('/chess/matches/:id/result', chessAdminAuth, adminCtrl.submitMatchResult);
+router.post('/matches/:id/undo', chessAdminAuth, adminCtrl.undoMatchTurn);
+router.post('/chess/matches/:id/undo', chessAdminAuth, adminCtrl.undoMatchTurn);
 
 // Standings
 router.get('/standings', chessAdminAuth, adminCtrl.getAdminStandings);

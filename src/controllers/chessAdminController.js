@@ -1320,3 +1320,96 @@ exports.resetTournamentData = async (req, res, next) => {
     next(err);
   }
 };
+
+// Admin Only: Undo last turn switch on a live Chess match (POST /admin/matches/:id/undo)
+exports.undoMatchTurn = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+
+    if (isDbConnected()) {
+      let match = mongoose.Types.ObjectId.isValid(id) ? await ChessMatch.findById(id) : null;
+      if (!match) {
+        match = await ChessMatch.findOne({ matchId: id });
+      }
+      if (!match) {
+        return res.status(404).json({ success: false, message: 'Match not found.' });
+      }
+      if (match.status !== 'live') {
+        return res.status(400).json({ success: false, message: 'Only live matches can have a turn undone.' });
+      }
+
+      const prev = match.previousClockState;
+      const hasSnapshot = prev && prev.activeTurn && ['white', 'black'].includes(prev.activeTurn);
+
+      if (hasSnapshot) {
+        match.activeTurn = prev.activeTurn;
+        if (typeof prev.whiteTimeRemaining === 'number') match.whiteTimeRemaining = prev.whiteTimeRemaining;
+        if (typeof prev.blackTimeRemaining === 'number') match.blackTimeRemaining = prev.blackTimeRemaining;
+        if (typeof prev.movesCount === 'number') match.movesCount = Math.max(0, prev.movesCount);
+        if (typeof prev.isClockRunning === 'boolean') match.isClockRunning = prev.isClockRunning;
+      } else if ((match.movesCount || 0) > 0 || match.activeTurn === 'black') {
+        match.activeTurn = match.activeTurn === 'black' ? 'white' : 'black';
+        match.movesCount = Math.max(0, (match.movesCount || 0) - 1);
+      } else {
+        return res.status(400).json({ success: false, message: 'No previous turn available to undo yet.' });
+      }
+
+      match.previousClockState = {
+        activeTurn: null,
+        whiteTimeRemaining: null,
+        blackTimeRemaining: null,
+        movesCount: null,
+        isClockRunning: null,
+        savedAt: null
+      };
+      match.lastClockUpdate = new Date();
+      await match.save();
+      await match.populate('player1 player2 byePlayer');
+
+      emitMatchUpdate(match._id, 'chess:clock_updated', match);
+      emitChessLive('chess:match_updated', match);
+
+      return res.json({
+        success: true,
+        message: `Turn undone by Admin. Clock restored to ${match.activeTurn.toUpperCase()}.`,
+        data: match
+      });
+    }
+
+    const match = memoryStore.matches.find((m) => m._id === id || m.matchId === id);
+    if (!match) {
+      return res.status(404).json({ success: false, message: 'Match not found.' });
+    }
+    if (match.status !== 'live') {
+      return res.status(400).json({ success: false, message: 'Only live matches can have a turn undone.' });
+    }
+
+    const prev = match.previousClockState;
+    if (prev && prev.activeTurn && ['white', 'black'].includes(prev.activeTurn)) {
+      match.activeTurn = prev.activeTurn;
+      if (typeof prev.whiteTimeRemaining === 'number') match.whiteTimeRemaining = prev.whiteTimeRemaining;
+      if (typeof prev.blackTimeRemaining === 'number') match.blackTimeRemaining = prev.blackTimeRemaining;
+      if (typeof prev.movesCount === 'number') match.movesCount = Math.max(0, prev.movesCount);
+      if (typeof prev.isClockRunning === 'boolean') match.isClockRunning = prev.isClockRunning;
+    } else if ((match.movesCount || 0) > 0 || match.activeTurn === 'black') {
+      match.activeTurn = match.activeTurn === 'black' ? 'white' : 'black';
+      match.movesCount = Math.max(0, (match.movesCount || 0) - 1);
+    } else {
+      return res.status(400).json({ success: false, message: 'No previous turn available to undo yet.' });
+    }
+
+    match.previousClockState = null;
+    match.lastClockUpdate = new Date();
+
+    emitMatchUpdate(match._id, 'chess:clock_updated', match);
+    emitChessLive('chess:match_updated', match);
+
+    res.json({
+      success: true,
+      message: `Turn undone by Admin. Clock restored to ${match.activeTurn.toUpperCase()}.`,
+      data: match
+    });
+  } catch (err) {
+    next(err);
+  }
+};

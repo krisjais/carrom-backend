@@ -103,6 +103,14 @@ const chessMatchSchema = new mongoose.Schema(
       type: Date,
       default: null
     },
+    previousClockState: {
+      activeTurn: { type: String, enum: ['white', 'black', 'paused', 'none', null], default: null },
+      whiteTimeRemaining: { type: Number, default: null },
+      blackTimeRemaining: { type: Number, default: null },
+      movesCount: { type: Number, default: null },
+      isClockRunning: { type: Boolean, default: null },
+      savedAt: { type: Date, default: null }
+    },
     player1Score: {
       type: Number,
       default: 0

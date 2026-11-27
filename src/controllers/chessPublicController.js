@@ -433,8 +433,17 @@ exports.updateMatchClock = async (req, res, next) => {
       addMinutes,
       addSeconds,
       addWhiteSeconds,
-      addBlackSeconds
+      addBlackSeconds,
+      action,
+      undo
     } = req.body;
+
+    if (undo === true || action === 'undo') {
+      return res.status(403).json({
+        success: false,
+        message: 'Only administrators can undo a match turn.'
+      });
+    }
 
     let match = null;
     if (isDbConnected()) {
@@ -449,6 +458,21 @@ exports.updateMatchClock = async (req, res, next) => {
       }
       if (!match) {
         return res.status(404).json({ success: false, message: 'Match not found.' });
+      }
+
+      const isTurnAdvance =
+        (activeTurn !== undefined && activeTurn !== match.activeTurn) ||
+        (typeof movesCount === 'number' && movesCount > (match.movesCount || 0));
+
+      if (match.status === 'live' && isTurnAdvance) {
+        match.previousClockState = {
+          activeTurn: match.activeTurn,
+          whiteTimeRemaining: match.whiteTimeRemaining,
+          blackTimeRemaining: match.blackTimeRemaining,
+          movesCount: match.movesCount || 0,
+          isClockRunning: match.isClockRunning,
+          savedAt: new Date()
+        };
       }
 
       if (activeTurn !== undefined) match.activeTurn = activeTurn;
@@ -498,6 +522,19 @@ exports.updateMatchClock = async (req, res, next) => {
     match = memoryStore.matches.find(m => m._id === id || m.matchId === id || (m.matchId && m.matchId.toLowerCase() === String(id).toLowerCase()));
     if (!match) {
       return res.status(404).json({ success: false, message: 'Match not found.' });
+    }
+    const isMemTurnAdvance =
+      (activeTurn !== undefined && activeTurn !== match.activeTurn) ||
+      (typeof movesCount === 'number' && movesCount > (match.movesCount || 0));
+    if (match.status === 'live' && isMemTurnAdvance) {
+      match.previousClockState = {
+        activeTurn: match.activeTurn,
+        whiteTimeRemaining: match.whiteTimeRemaining,
+        blackTimeRemaining: match.blackTimeRemaining,
+        movesCount: match.movesCount || 0,
+        isClockRunning: match.isClockRunning,
+        savedAt: new Date()
+      };
     }
     if (activeTurn !== undefined) match.activeTurn = activeTurn;
     if (typeof whiteTimeRemaining === 'number') match.whiteTimeRemaining = Math.max(0, Math.round(whiteTimeRemaining));
