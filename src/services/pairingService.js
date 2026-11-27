@@ -5,6 +5,18 @@ const ChessRound = require('../models/ChessRound');
 const memoryStore = require('../utils/chessMemoryDb');
 const { getConfiguration } = require('./scoringService');
 
+/**
+ * Fisher-Yates unbiased in-place shuffle (returns new array)
+ */
+const shuffleArray = (items = []) => {
+  const arr = [...items];
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+};
+
 const generateRoundPairings = async (roundNumber = null, roundName = null) => {
   const config = await getConfiguration();
   const isDbConnected = mongoose.connection.readyState === 1;
@@ -185,11 +197,16 @@ const generateRoundPairings = async (roundNumber = null, roundName = null) => {
     throw new Error(`At least 2 available players are required to generate pairings for ${customRoundName}.`);
   }
 
-  // Sort remaining pool
+  // Randomize pool first so tied/Round-1 pairings are always in unbiased random order
+  playerPool = shuffleArray(playerPool);
+
+  // In later rounds, keep higher point scorers ahead while preserving random order within ties
   playerPool.sort((a, b) => {
-    return (b.materialPoints || 0) - (a.materialPoints || 0) ||
-           (b.tournamentPoints || 0) - (a.tournamentPoints || 0) ||
-           (b.wins || 0) - (a.wins || 0);
+    const ptDiff = (b.tournamentPoints || 0) - (a.tournamentPoints || 0);
+    if (ptDiff !== 0) return ptDiff;
+    const matDiff = (b.materialPoints || 0) - (a.materialPoints || 0);
+    if (matDiff !== 0) return matDiff;
+    return (b.wins || 0) - (a.wins || 0);
   });
 
   const createdMatches = [];
@@ -197,13 +214,11 @@ const generateRoundPairings = async (roundNumber = null, roundName = null) => {
 
   // 3. Odd Number of Players: Award an Automatic BYE to advance to next round
   if (playerPool.length % 2 !== 0) {
-    // Sort candidates primarily by Tournament Points, Wins, then Seed/Rank
+    // Sort randomized candidates by Tournament Points and Wins, preserving random tie-break
     const candidates = [...playerPool].sort((a, b) => {
       const ptDiff = (b.tournamentPoints || 0) - (a.tournamentPoints || 0);
       if (ptDiff !== 0) return ptDiff;
-      const winDiff = (b.wins || 0) - (a.wins || 0);
-      if (winDiff !== 0) return winDiff;
-      return (a.rank || 9999) - (b.rank || 9999);
+      return (b.wins || 0) - (a.wins || 0);
     });
 
     // Find the player who has not yet received a BYE in previous rounds
